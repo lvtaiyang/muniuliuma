@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.egg-info/
+vendor/wechat-cli/node_modules/
+dist/
+*.egg
