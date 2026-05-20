@@ -533,6 +533,32 @@ async def tool_read_experiment_report(project_name: str, filename: str) -> str:
     return content
 
 
+# ── 工作流引导（每个会话必须先调用）─────────────────────────────
+
+async def tool_get_workflow() -> str:
+    """【必须首先调用】返回当前状态和正确的下一步操作。每个会话开始时先调此工具。"""
+    conf = cfg.load()
+    projects = database.list_projects()
+    text_key = bool(cfg.get_llm_config("text").get("api_key"))
+    vision_key = bool(cfg.get_llm_config("vision").get("api_key"))
+    recent = database.query_calls(limit=5)
+    steps = []
+    if not projects:
+        steps.append({"step": 1, "action": "project_init",
+            "message": "没有项目。询问用户: 项目名称/类型/阶段/工作区路径, 然后 project_init 创建。"})
+    else:
+        steps.append({"step": 1, "action": "project_load",
+            "message": f"已有项目: {', '.join(p['name'] for p in projects[:5])}。加载获取工作区路径。"})
+    if not text_key and not vision_key:
+        steps.append({"step": 2, "action": "pure_io",
+            "message": "未配API Key。纯文本走纯I/O路径: read_template_cells→自己分析→fill_template_cells。多模态暂不可用。"})
+    else:
+        steps.append({"step": 2, "action": "ready",
+            "message": f"text={'已配' if text_key else '未配'}, vision={'已配' if vision_key else '未配'}"})
+    return json.dumps({"projects_count": len(projects), "projects": [p["name"] for p in projects],
+        "text_api_configured": text_key, "vision_api_configured": vision_key,
+        "steps": steps, "rule": "先完成step 1再执行后续操作。纯文本默认走纯I/O。"}, ensure_ascii=False, indent=2)
+
 # ── 纯 I/O 工具（智能体驱动，不调 LLM）─────────────────────────
 
 async def tool_read_template_cells(file_path: str) -> str:
@@ -1073,6 +1099,8 @@ TOOLS = [
 ]
 
 TOOL_MAP = {
+    # 工作流
+    "get_workflow": tool_get_workflow,
     # 活动日志
     "read_template_cells": tool_read_template_cells,
     "fill_template_cells": tool_fill_template_cells,
