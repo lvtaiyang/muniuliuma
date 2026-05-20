@@ -11,14 +11,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Windows COM 自动化：完美保留格式（推荐 Windows 生产环境安装）
+# Windows COM 自动化：完美保留格式（仅 Windows，推荐安装）
 win32 = ["pywin32>=306"]
-# 回退模式：非 Windows 环境测试用
+# 回退模式：非 Windows 环境也可用
 docx = ["python-docx>=0.8.11"]
 xlsx = ["openpyxl>=3.0"]
 pdf = ["pdfplumber>=0.9.0"]
-# 完整安装
-full = ["pywin32>=306", "python-docx>=0.8.11", "openpyxl>=3.0", "pdfplumber>=0.9.0"]
+# 跨平台全量安装（Windows 用户建议加 win32: pip install -e ".[full,win32]"）
+full = ["python-docx>=0.8.11", "openpyxl>=3.0", "pdfplumber>=0.9.0"]
 
 [project.scripts]
 muniuliuma-mcp = "mcp_server:run"

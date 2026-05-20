@@ -18,7 +18,10 @@
 ```bash
 git clone https://github.com/lvtaiyang/muniuliuma.git
 cd muniuliuma
+# 跨平台全量（Linux/Mac/Windows 通用）
 pip install -e ".[full]"
+# Windows 用户推荐加装 COM 自动化（完美保留 Word/Excel 格式）
+pip install -e ".[full,win32]"
 ```
 
 按需安装：
