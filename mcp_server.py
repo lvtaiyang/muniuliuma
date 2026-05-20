@@ -82,7 +82,7 @@ except ImportError:
 
 # 加载实验报告模块
 try:
-    from src.experiment_report import report_generator, template_analyzer
+    from src.experiment_report import report_generator, template_analyzer, report_pipeline
 
     MODULES["experiment_report"] = {
         "name": "实验检测报告自动生成",
@@ -622,6 +622,24 @@ def _count_cells(values: dict[str, Any]) -> int:
     return sum(len(v) for v in values.values() if isinstance(v, dict))
 
 
+
+# ── 完整报告生成（单步工具，锁死流程）───────────────────────────
+
+async def tool_generate_complete_report(
+    template_path: str, ledger_paths_json: str,
+    output_dir: str, report_date: str = "",
+) -> str:
+    """一步生成完整实验报告。内部强制执行: 读模板→读台账→LLM逐单元格填充→COM写入→校验。"""
+    try:
+        paths = json.loads(ledger_paths_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "ledger_paths_json 不是有效 JSON"}, ensure_ascii=False)
+    result = report_pipeline.generate_complete_report(
+        template_path=template_path, ledger_paths=paths,
+        output_dir=output_dir, report_date=report_date,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
 # ── 活动日志工具 ────────────────────────────────────────────────
 
 # ── 分部分项解析工具 ────────────────────────────────────────────
@@ -680,6 +698,21 @@ async def tool_get_activity_summary(since: str = "24h") -> str:
 
 TOOLS = [
     # ── 系统工具 ──
+    # ── 完整报告生成（单步工具）──
+    Tool(
+        name="generate_complete_report",
+        description="一步生成完整实验报告。内部强制执行: 读模板全部单元格→读台账→LLM逐单元格决定填充(固定文本保留/台账提取/计算/缺数据填见原始记录)→COM写入→校验示例值残留。推荐使用此工具而非手动4步流程。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "template_path": {"type": "string", "description": "xlsx 模板路径"},
+                "ledger_paths_json": {"type": "string", "description": "台账文件路径 JSON 数组"},
+                "output_dir": {"type": "string", "description": "输出目录"},
+                "report_date": {"type": "string", "description": "报告日期 YYYY-MM-DD"},
+            },
+            "required": ["template_path", "ledger_paths_json", "output_dir"],
+        },
+    ),
     # ── 纯 I/O 工具（智能体驱动）──
     Tool(
         name="read_template_cells",
@@ -1101,6 +1134,7 @@ TOOLS = [
 TOOL_MAP = {
     # 工作流
     "get_workflow": tool_get_workflow,
+    "generate_complete_report": tool_generate_complete_report,
     # 活动日志
     "read_template_cells": tool_read_template_cells,
     "fill_template_cells": tool_fill_template_cells,
