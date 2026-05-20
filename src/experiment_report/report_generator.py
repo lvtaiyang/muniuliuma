@@ -119,23 +119,33 @@ def generate_from_template(
 
     extracted = _parse_response(response.choices[0].message.content or "")
 
-    # 5. 加载 xlsx 模板并填充
+    # 5. 通过 win32com 填充 xlsx（保留原生格式）
     source_file = tmpl_def.get("source_file", "")
     if not source_file or not Path(source_file).exists():
-        return {"error": f"模板源文件不存在: {source_file}，请重新分析上传模板"}
+        return {"error": f"模板源文件不存在: {source_file}"}
+
+    from .. import win32_helper
+    output_dir = _get_report_dir(project_name)
+    if not output_dir:
+        return {"error": f"项目不存在: {project_name}"}
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', tmpl_def.get("template_name", "report"))[:30]
+    filename = f"{report_date}_{safe_name}.xlsx"
+    output_path = (output_dir / filename).resolve()
 
     try:
-        output_path = _fill_xlsx(
+        output_path = win32_helper.excel_fill_template(
             template_path=source_file,
-            template_def=tmpl_def,
-            extracted_data=extracted,
-            report_date=report_date,
-            project_name=project_name,
+            output_path=output_path,
+            fill_data={
+                "sheets": tmpl_def.get("sheets", []),
+                "report_data": extracted.get("report_data", {}),
+                "data_table_rows": extracted.get("data_table_rows", []),
+                "logic_rules": tmpl_def.get("logic_rules", []),
+            },
         )
     except Exception as e:
         return {"error": f"填充 xlsx 失败: {e}", "extracted_data": extracted}
 
-    # 保存 Markdown 预览
     preview_path = _save_preview(project_name, report_date, tmpl_def, extracted)
 
     return {
@@ -209,13 +219,24 @@ def generate_single_from_template(
     if not source_file or not Path(source_file).exists():
         return {"error": f"模板源文件不存在: {source_file}"}
 
+    from .. import win32_helper
+    output_dir = _get_report_dir(project_name)
+    if not output_dir:
+        return {"error": f"项目不存在: {project_name}"}
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', f"{test_item}_{tmpl_def.get('template_name', 'report')}")[:40]
+    filename = f"{report_date}_{safe_name}.xlsx"
+    output_path = (output_dir / filename).resolve()
+
     try:
-        output_path = _fill_xlsx(
+        output_path = win32_helper.excel_fill_template(
             template_path=source_file,
-            template_def=tmpl_def,
-            extracted_data=extracted,
-            report_date=report_date,
-            project_name=project_name,
+            output_path=output_path,
+            fill_data={
+                "sheets": tmpl_def.get("sheets", []),
+                "report_data": extracted.get("report_data", {}),
+                "data_table_rows": extracted.get("data_table_rows", []),
+                "logic_rules": tmpl_def.get("logic_rules", []),
+            },
         )
     except Exception as e:
         return {"error": f"填充 xlsx 失败: {e}", "extracted_data": extracted}
@@ -266,169 +287,7 @@ def read_report(project_name: str, filename: str) -> str | None:
     return path.read_text(encoding="utf-8")
 
 
-# ── xlsx 填充引擎 (win32com) ───────────────────────────────────
-
-def _fill_xlsx(
-    template_path: str | Path,
-    template_def: dict[str, Any],
-    extracted_data: dict[str, Any],
-    report_date: str,
-    project_name: str,
-) -> Path:
-    """用提取的数据填充 xlsx 模板。
-
-    Windows + Office/WPS: win32com 原生操作，完美保留格式
-    其他环境: openpyxl 回退模式（用于测试逻辑）
-    """
-    from .. import win32_helper
-
-    output_dir = _get_report_dir(project_name)
-    if not output_dir:
-        raise RuntimeError(f"项目不存在: {project_name}")
-
-    safe_name = re.sub(r'[\\/:*?"<>|]', '_', template_def.get("template_name", "report"))[:30]
-    filename = f"{report_date}_{safe_name}.xlsx"
-    output_path = (output_dir / filename).resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    report_data = extracted_data.get("report_data", {})
-    data_table_rows = extracted_data.get("data_table_rows", [])
-
-    with win32_helper.open_excel(template_path) as (app, wb, app_name):
-        is_com = win32_helper.WIN32_AVAILABLE and app is not None
-        sheets_def = template_def.get("sheets", [])
-        # 向后兼容旧格式
-        if not sheets_def:
-            sheets_def = [{"sheet_name": "", "regions": template_def.get("regions", []),
-                           "data_table": template_def.get("data_table", {})}]
-
-        for si, sheet_def in enumerate(sheets_def):
-            sname = sheet_def.get("sheet_name", "")
-            try:
-                if is_com:
-                    ws = wb.Worksheets(sname) if sname else wb.Worksheets(si + 1)
-                else:
-                    ws = wb[sname] if sname and sname in wb.sheetnames else wb.active
-            except Exception:
-                continue
-
-            # 1. 填充固定区域
-            for region in sheet_def.get("regions", []):
-                cells = region.get("cells", "")
-                rid = region.get("id", "")
-                value = report_data.get(rid, "")
-
-                if not value and region.get("fixed_value"):
-                    value = region["fixed_value"]
-                if not value:
-                    continue
-
-                target_cell = cells.split(":")[0] if ":" in cells else cells
-                try:
-                    if is_com:
-                        ws.Range(target_cell).Value = value
-                    else:
-                        _write_cell_ol(ws, target_cell, value)
-                except Exception:
-                    pass
-
-            # 2. 填充数据表（仅 main_report 工作表）
-            data_table = sheet_def.get("data_table", {})
-            if data_table and data_table_rows and sheet_def.get("sheet_role") == "main_report":
-                header_row = data_table.get("data_start_row", data_table.get("header_row", 5) + 1)
-                columns = data_table.get("columns", [])
-
-                if is_com and len(data_table_rows) > 1:
-                    for i in range(1, len(data_table_rows)):
-                        ws.Rows(header_row).Insert()
-                elif not is_com and len(data_table_rows) > 1:
-                    ws.insert_rows(header_row, len(data_table_rows) - 1)
-
-                for i, row_data in enumerate(data_table_rows):
-                    current_row = header_row + i
-                    for col_def in columns:
-                        col_letter = col_def.get("col_letter", "")
-                        if not col_letter:
-                            continue
-                        value = row_data.get(col_letter, row_data.get(col_def.get("header_text", ""), ""))
-                        try:
-                            if is_com:
-                                ws.Range(f"{col_letter}{current_row}").Value = value
-                            else:
-                                _write_cell_ol(ws, f"{col_letter}{current_row}", value)
-                        except Exception:
-                            pass
-
-            # 3. 应用逻辑规则
-            logic_rules = template_def.get("logic_rules", [])
-            for rule in logic_rules:
-                if rule.get("confidence") != "high":
-                    continue
-                rule_sheet = rule.get("applies_in_sheet", "")
-                if rule_sheet and rule_sheet != sname:
-                    continue  # 此规则不属于当前工作表和
-                _apply_logic_rule(ws, rule, data_table, data_table_rows, is_com)
-
-        # 4. 另存
-        win32_helper.excel_save_as(wb, output_path)
-
-    return output_path
-
-
-def _write_cell_ol(ws, cell_ref: str, value: Any) -> None:
-    """openpyxl 模式写单元格。"""
-    from openpyxl.utils import column_index_from_string
-    col_str = "".join(c for c in cell_ref if c.isalpha())
-    row_str = "".join(c for c in cell_ref if c.isdigit())
-    if col_str and row_str:
-        ws.cell(row=int(row_str), column=column_index_from_string(col_str), value=value)
-
-
-def _apply_logic_rule(
-    ws,
-    rule: dict[str, Any],
-    data_table: dict[str, Any],
-    data_rows: list[dict[str, Any]],
-    is_com: bool,
-) -> None:
-    """应用逻辑规则（如自动判定合格/不合格）。"""
-    applies_to = rule.get("applies_to", "")
-    if not applies_to:
-        return
-
-    depends_on = rule.get("depends_on", [])
-    if len(depends_on) < 2:
-        return
-
-    dep_cols = []
-    for dep in depends_on:
-        parts = dep.split(".")
-        if len(parts) >= 2:
-            col_letter = parts[-1].replace("col_letter_", "")
-            dep_cols.append(col_letter)
-
-    target_col = applies_to.replace("data_table.", "").replace("col_letter_", "")
-    header_row = data_table.get("data_start_row", data_table.get("header_row", 5) + 1)
-
-    for i, row_data in enumerate(data_rows):
-        current_row = header_row + i
-        dep_values = [row_data.get(c, "") for c in dep_cols]
-
-        try:
-            measured = float(str(dep_values[0]))
-            required = float(str(dep_values[1]))
-            conclusion = "合格" if measured >= required else "不合格"
-        except (ValueError, TypeError):
-            continue
-
-        try:
-            cell_ref = f"{target_col}{current_row}"
-            if is_com:
-                ws.Range(cell_ref).Value = conclusion
-            else:
-                _write_cell_ol(ws, cell_ref, conclusion)
-        except Exception:
-            pass
+# ── xlsx 填充 —— 通过 win32_helper.excel_fill_template() 完成 ──
 
 
 # ── 辅助函数 ────────────────────────────────────────────────────
@@ -565,32 +424,20 @@ def _save_preview(
 
 
 def _read_xlsx_preview(path: Path) -> str:
-    """读取 xlsx 文件并返回 Markdown 预览。支持 COM 和 openpyxl 两种模式。"""
+    """读取 xlsx 文件返回 Markdown 预览。仅通过 COM 操作。"""
     from .. import win32_helper
     try:
-        with win32_helper.open_excel(path) as (app, wb, app_name):
-            is_com = win32_helper.WIN32_AVAILABLE and app is not None
-            lines = [f"# 实验报告: {path.name}", ""]
-
-            if is_com:
-                ws = wb.Worksheets(1)
-                used = ws.UsedRange
-                max_row = min(used.Rows.Count, 100)
-                max_col = min(used.Columns.Count, 30)
-                for row_idx in range(1, max_row + 1):
-                    cells = []
-                    for col_idx in range(1, max_col + 1):
-                        value = ws.Cells(row_idx, col_idx).Value
-                        cells.append(str(value) if value is not None else "")
-                    if any(cells):
-                        lines.append(" | ".join(cells))
-            else:
-                ws = wb.active
-                for row in ws.iter_rows(values_only=True, max_row=100):
-                    cells = [str(c) if c is not None else "" for c in row]
-                    if any(cells):
-                        lines.append(" | ".join(cells))
-            return "\n".join(lines)
+        structure = win32_helper.excel_read_structure(path)
+        if "error" in structure:
+            return f"无法读取 xlsx: {structure['error']}"
+        lines = [f"# 实验报告: {path.name}", ""]
+        for sheet in structure.get("sheets", []):
+            lines.append(f"## {sheet['name']}")
+            for row_info in sheet.get("rows", []):
+                cells = [c["value"] for c in row_info["cells"]]
+                lines.append(" | ".join(cells))
+            lines.append("")
+        return "\n".join(lines)
     except Exception as e:
         return f"无法读取 xlsx: {e}"
 

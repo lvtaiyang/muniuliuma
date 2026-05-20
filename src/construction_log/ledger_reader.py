@@ -42,37 +42,10 @@ def read_ledgers(file_paths: list[str]) -> list[dict[str, Any]]:
 
 def _read_xlsx(path: Path) -> list[dict[str, Any]]:
     from .. import win32_helper
-    with win32_helper.open_excel(path) as (app, wb, app_name):
-        is_com = win32_helper.WIN32_AVAILABLE and app is not None
-        sheets = []
-        if is_com:
-            for i in range(1, wb.Worksheets.Count + 1):
-                ws = wb.Worksheets(i)
-                rows = []
-                try:
-                    used = ws.UsedRange
-                    max_row = min(used.Rows.Count, 500)
-                    max_col = min(used.Columns.Count, 50)
-                    for row_idx in range(1, max_row + 1):
-                        cells = []
-                        for col_idx in range(1, max_col + 1):
-                            value = ws.Cells(row_idx, col_idx).Value
-                            cells.append(str(value) if value is not None else "")
-                        if any(cells):
-                            rows.append(cells)
-                except Exception:
-                    pass
-                sheets.append({"name": ws.Name, "rows": rows})
-        else:
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                rows = []
-                for row in ws.iter_rows(values_only=True, max_row=500):
-                    cells = [str(c) if c is not None else "" for c in row]
-                    if any(cells):
-                        rows.append(cells)
-                sheets.append({"name": sheet_name, "rows": rows})
-        return sheets
+    result = win32_helper.excel_read_ledger(path)
+    if "error" in result:
+        raise RuntimeError(result["error"])
+    return result.get("sheets", [])
 
 
 def _read_csv(path: Path) -> list[list[str]]:
