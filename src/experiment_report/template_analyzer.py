@@ -214,51 +214,32 @@ def save_template_definition(
     template_definition: dict[str, Any],
     filename: str = "",
 ) -> dict[str, Any]:
-    """将确认后的模板定义保存到项目中。
-
-    Args:
-        project_name: 项目名称
-        template_definition: 确认后的模板定义 JSON
-        filename: 保存的文件名（可选）
-    """
-    template_dir = _get_template_dir(project_name)
-    if not template_dir:
-        return {"error": f"项目不存在: {project_name}"}
-
-    name = filename or f"{template_definition.get('template_name', 'experiment_template')}.json"
-    if not name.endswith(".json"):
-        name += ".json"
-
+    """将确认后的模板定义保存到数据库。"""
+    from .. import database
+    tname = filename or template_definition.get("template_name", "experiment_template")
+    if tname.endswith(".json"):
+        tname = tname[:-5]
     template_definition["saved_at"] = _now_iso()
     template_definition["project_name"] = project_name
-
-    path = template_dir / name
-    path.write_text(
-        json.dumps(template_definition, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    return {
-        "saved": str(path),
-        "template_name": template_definition.get("template_name", ""),
-    }
+    try:
+        tid = database.save_template(
+            project_name=project_name, template_name=tname,
+            definition=template_definition,
+            report_type=template_definition.get("report_type", ""),
+            source_file=template_definition.get("source_file", ""),
+        )
+        return {"saved": True, "id": tid, "template_name": tname}
+    except Exception as e:
+        return {"error": f"保存失败: {e}"}
 
 
 def load_template_definition(project_name: str, template_name: str) -> dict[str, Any] | None:
-    """加载已保存的模板定义。"""
-    template_dir = _get_template_dir(project_name)
-    if not template_dir:
-        return None
-    path = template_dir / template_name
-    if not path.exists():
-        # 尝试加 .json 后缀
-        path = template_dir / f"{template_name}.json"
-        if not path.exists():
-            return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, IOError):
-        return None
+    """从数据库加载模板定义。"""
+    from .. import database
+    if template_name.endswith(".json"):
+        template_name = template_name[:-5]
+    tmpl = database.get_template(project_name, template_name)
+    return tmpl["definition"] if tmpl else None
 
 
 def confirm_template(
@@ -304,7 +285,16 @@ def confirm_template(
             # 未回答的保留
             u["resolved"] = False
 
-    # 处理 regions 中的 question
+    # 处理各 sheet 中 regions 的 question
+    for sheet in analysis_result.get("sheets", []):
+        for region in sheet.get("regions", []):
+            rid = region.get("id", "")
+            if rid in answer_map:
+                region["resolution"] = answer_map[rid]
+                region["confidence"] = "high"
+                region["question"] = ""
+
+    # 向后兼容旧格式（无 sheets 包裹）
     for region in analysis_result.get("regions", []):
         rid = region.get("id", "")
         if rid in answer_map:
@@ -332,24 +322,9 @@ def confirm_template(
 
 
 def list_template_definitions(project_name: str) -> list[dict[str, Any]]:
-    """列出项目已保存的模板定义。"""
-    template_dir = _get_template_dir(project_name)
-    if not template_dir or not template_dir.exists():
-        return []
-    templates = []
-    for f in sorted(template_dir.glob("*.json")):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            templates.append({
-                "filename": f.name,
-                "template_name": data.get("template_name", f.stem),
-                "report_type": data.get("report_type", ""),
-                "saved_at": data.get("saved_at", ""),
-                "path": str(f),
-            })
-        except (json.JSONDecodeError, IOError):
-            templates.append({"filename": f.name, "template_name": f.stem, "error": "无法读取"})
-    return templates
+    """列出项目数据库中的模板定义。"""
+    from .. import database
+    return database.list_templates(project_name)
 
 
 # ── 内部函数 ────────────────────────────────────────────────────
@@ -396,18 +371,6 @@ def _build_analysis_prompt(filename: str, structure: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _get_template_dir(project_name: str) -> Path | None:
-    """获取项目模板存储目录。"""
-    try:
-        from ..project_initializer import project_manager
-        proj = project_manager.load(project_name)
-        if proj:
-            template_dir = Path(proj["workspace"]) / "04_施工实施" / "实验检测报告" / "_模板定义"
-            template_dir.mkdir(parents=True, exist_ok=True)
-            return template_dir
-    except ImportError:
-        pass
-    return None
 
 
 def _parse_response(content: str) -> dict[str, Any]:

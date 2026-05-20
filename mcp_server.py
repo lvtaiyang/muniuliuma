@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src import config as cfg
-from src import activity_logger
+from src import database
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -532,35 +532,25 @@ async def tool_get_activity_log(
     module: str = "", status: str = "",
     since: str = "",
 ) -> str:
-    """查询 MCP 工具的调用历史。可用于查看之前做了什么、排查问题。"""
-    logs = activity_logger.query_logs(
-        limit=int(limit),
-        tool_name=tool_name,
-        module=module,
-        status=status,
-        since=since,
+    """查询 MCP 工具的调用历史。"""
+    logs = database.query_calls(
+        limit=int(limit), tool_name=tool_name,
+        module=module, status=status, since=since,
     )
-    # 简化输出
-    compact = []
-    for entry in logs:
-        compact.append({
-            "time": entry["called_at"],
-            "tool": entry["tool_name"],
-            "module": entry["module"],
-            "status": entry["status"],
-            "duration_ms": entry["duration_ms"],
-            "summary": entry["result_summary"][:200],
-        })
+    compact = [{
+        "time": e["called_at"], "tool": e["tool_name"],
+        "module": e["module"], "status": e["status"],
+        "duration_ms": e["duration_ms"], "summary": e["result_summary"][:200],
+    } for e in logs]
     return json.dumps({
-        "count": len(compact),
-        "logs": compact,
+        "count": len(compact), "logs": compact,
         "hint": "用 since='1h'/'24h' 筛选时间，用 module='experiment_report' 筛选模块",
     }, ensure_ascii=False, indent=2)
 
 
 async def tool_get_activity_summary(since: str = "24h") -> str:
-    """获取最近活动概要：调用次数、成功率、各模块/工具使用统计、最近错误。"""
-    summary = activity_logger.get_summary(since=since)
+    """获取最近活动概要。"""
+    summary = database.get_call_summary(since=since)
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
@@ -982,24 +972,24 @@ async def call_tool(name: str, arguments: dict):
         result = await handler(**arguments)
         _elapsed = int((_time.time() - _start) * 1000)
         # 记录成功调用
-        activity_logger.log_call(
+        database.record_call(
             tool_name=name,
             params=arguments,
             result_summary=_summarize_result(name, result),
             status="success",
             duration_ms=_elapsed,
-            module=activity_logger._classify_module(name),
+            module=database._classify_module(name),
         )
         return [TextContent(type="text", text=result)]
     except Exception as exc:
         _elapsed = int((_time.time() - _start) * 1000)
-        activity_logger.log_call(
+        database.record_call(
             tool_name=name,
             params=arguments,
             result_summary=str(exc)[:500],
             status="error",
             duration_ms=_elapsed,
-            module=activity_logger._classify_module(name),
+            module=database._classify_module(name),
         )
         raise
 

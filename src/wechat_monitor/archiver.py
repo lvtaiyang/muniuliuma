@@ -87,6 +87,22 @@ def archive_image(
     # 复制
     shutil.copy2(src_path, target_path)
 
+    # 同步写入数据库
+    try:
+        from .. import database
+        database.save_archive(
+            project_name=project_name if project_name != "未分类" else "",
+            category=category_name,
+            filename=target_path.name,
+            path=str(target_path),
+            original_path=str(src_path),
+            description=analysis.get("description", ""),
+            quality_notes=analysis.get("quality_notes", ""),
+            analysis=analysis,
+        )
+    except Exception:
+        pass
+
     return {
         "archived_path": str(target_path),
         "project": project_name,
