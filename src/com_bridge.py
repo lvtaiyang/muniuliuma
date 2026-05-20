@@ -162,6 +162,18 @@ def cmd_excel_read(file_path: str, max_row: int = 500):
 
 # ── 操作 3: 填充 xlsx 模板 ─────────────────────────────────────
 
+
+def _safe_range_write(ws, cell_ref: str, value) -> None:
+    """安全写入。合并单元格写左上角。"""
+    rng = ws.Range(cell_ref)
+    try:
+        if rng.MergeCells:
+            rng.MergeArea.Cells(1, 1).Value = value
+        else:
+            rng.Value = value
+    except Exception:
+        rng.Value = value
+
 def cmd_excel_fill(template_path: str, output_path: str, data_json_path: str):
     if not os.path.exists(template_path):
         print(json.dumps({"error": f"模板不存在: {template_path}"}, ensure_ascii=False))
@@ -201,7 +213,7 @@ def cmd_excel_fill(template_path: str, output_path: str, data_json_path: str):
                     continue
                 target_cell = cells.split(":")[0] if ":" in cells else cells
                 try:
-                    ws.Range(target_cell).Value = value
+                    _safe_range_write(ws, target_cell, value)
                 except Exception:
                     pass
 
@@ -211,10 +223,6 @@ def cmd_excel_fill(template_path: str, output_path: str, data_json_path: str):
                 header_row = dt.get("data_start_row", dt.get("header_row", 5) + 1)
                 columns = dt.get("columns", [])
 
-                if len(data_rows) > 1:
-                    for i in range(1, len(data_rows)):
-                        ws.Rows(header_row).Insert()
-
                 for i, row_data in enumerate(data_rows):
                     cr = header_row + i
                     for col_def in columns:
@@ -223,7 +231,7 @@ def cmd_excel_fill(template_path: str, output_path: str, data_json_path: str):
                             continue
                         value = row_data.get(col_letter, "")
                         try:
-                            ws.Range(f"{col_letter}{cr}").Value = value
+                            _safe_range_write(ws, f"{col_letter}{cr}", value)
                         except Exception:
                             pass
 
@@ -244,7 +252,7 @@ def cmd_excel_fill(template_path: str, output_path: str, data_json_path: str):
                         measured = float(str(rd.get(dep_cols[0], "0")))
                         required = float(str(rd.get(dep_cols[1], "0")))
                         conclusion = "合格" if measured >= required else "不合格"
-                        ws.Range(f"{target_col}{cr}").Value = conclusion
+                        _safe_range_write(ws, f"{target_col}{cr}", conclusion)
                     except (ValueError, TypeError):
                         pass
 

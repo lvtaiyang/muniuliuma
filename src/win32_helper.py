@@ -448,7 +448,7 @@ def _excel_fill_native(template_path: Path, output_path: Path, data: dict[str, A
 
 
 def _fill_sheets(wb, data: dict[str, Any]) -> None:
-    """在 COM 工作簿中填充数据。"""
+    """在 COM 工作簿中填充数据（安全写入：合并单元格写左上角）。"""
     sheets_def = data.get("sheets", [])
     report_data = data.get("report_data", {})
     data_rows = data.get("data_table_rows", [])
@@ -470,7 +470,7 @@ def _fill_sheets(wb, data: dict[str, Any]) -> None:
                 continue
             target_cell = cells.split(":")[0] if ":" in cells else cells
             try:
-                ws.Range(target_cell).Value = value
+                _com_safe_write(ws, target_cell, value)
             except Exception:
                 pass
 
@@ -478,9 +478,6 @@ def _fill_sheets(wb, data: dict[str, Any]) -> None:
         if dt and data_rows and sheet_def.get("sheet_role") == "main_report":
             header_row = dt.get("data_start_row", dt.get("header_row", 5) + 1)
             columns = dt.get("columns", [])
-            if len(data_rows) > 1:
-                for i in range(1, len(data_rows)):
-                    ws.Rows(header_row).Insert()
             for i, rd in enumerate(data_rows):
                 cr = header_row + i
                 for col_def in columns:
@@ -489,7 +486,7 @@ def _fill_sheets(wb, data: dict[str, Any]) -> None:
                         continue
                     value = rd.get(col_letter, "")
                     try:
-                        ws.Range(f"{col_letter}{cr}").Value = value
+                        _com_safe_write(ws, f"{col_letter}{cr}", value)
                     except Exception:
                         pass
 
@@ -512,9 +509,21 @@ def _fill_sheets(wb, data: dict[str, Any]) -> None:
                     measured = float(str(rd.get(dep_cols[0], "0")))
                     required = float(str(rd.get(dep_cols[1], "0")))
                     conclusion = "合格" if measured >= required else "不合格"
-                    ws.Range(f"{target_col}{cr}").Value = conclusion
+                    _com_safe_write(ws, f"{target_col}{cr}", conclusion)
                 except (ValueError, TypeError):
                     pass
+
+
+def _com_safe_write(ws, cell_ref: str, value) -> None:
+    """安全写入单元格。若在合并区域内，写入左上角。"""
+    rng = ws.Range(cell_ref)
+    try:
+        if rng.MergeCells:
+            rng.MergeArea.Cells(1, 1).Value = value
+        else:
+            rng.Value = value
+    except Exception:
+        rng.Value = value
 
 
 def excel_read_ledger(file_path: str | Path, max_row: int = 500) -> dict[str, Any]:
