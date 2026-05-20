@@ -1,13 +1,15 @@
-"""Word 模板填充：将结构化数据填入用户上传的 .docx 模板中。
+"""Word 模板填充：通过 win32com 驱动本地 Word/WPS 替换占位符并另存。
 
-模板使用 {{field_name}} 占位符，支持段落和表格。
+模板使用 {{field_name}} 占位符，支持段落、表格、页眉页脚。
+通过原生 Word/WPS 执行操作，完美保留合并单元格等所有格式。
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
+
+from .. import win32_helper
 
 
 def fill_template(
@@ -15,70 +17,34 @@ def fill_template(
     data: dict[str, Any],
     output_path: str | Path,
 ) -> Path:
-    """将数据填入 Word 模板并保存。
+    """将数据填入 Word 模板并另存为新文件。
+
+    通过 Word/WPS 原生 Find/Replace 替换 {{key}} 占位符。
+    格式完全保留，包括合并单元格、边框、字体样式等。
 
     Args:
-        template_path: 用户上传的 .docx 模板路径
-        data: 键值对数据，如 {"日期": "2026-05-19", "天气": "晴", ...}
-        output_path: 输出文件路径
+        template_path: .docx 模板文件路径
+        data: 键值对，key 对应模板中的占位符名（不含大括号）
+        output_path: 输出 .docx 路径
     """
-    try:
-        import docx
-    except ImportError:
-        raise ImportError("需要 python-docx: pip install python-docx")
-
-    doc = docx.Document(str(template_path))
-
-    # 替换段落中的占位符
-    for paragraph in doc.paragraphs:
-        _replace_in_paragraph(paragraph, data)
-
-    # 替换表格中的占位符
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    _replace_in_paragraph(paragraph, data)
-
-    # 处理页眉页脚
-    for section in doc.sections:
-        for paragraph in section.header.paragraphs:
-            _replace_in_paragraph(paragraph, data)
-        for paragraph in section.footer.paragraphs:
-            _replace_in_paragraph(paragraph, data)
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
-    return output_path
-
-
-def _replace_in_paragraph(paragraph, data: dict[str, Any]) -> None:
-    """替换段落中所有 {{key}} 占位符。保留原格式。"""
-    for run in paragraph.runs:
-        if not run.text:
-            continue
-        replaced = run.text
-        for key, value in data.items():
-            placeholder = f"{{{{{key}}}}}"
-            if placeholder in replaced:
-                value_str = _format_value(value)
-                replaced = replaced.replace(placeholder, value_str)
-        if replaced != run.text:
-            run.text = replaced
+    fill_data = {k: _format_value(v) for k, v in data.items()}
+    return win32_helper.word_fill_placeholders(
+        template_path=template_path,
+        output_path=output_path,
+        data=fill_data,
+    )
 
 
 def _format_value(value: Any) -> str:
     if isinstance(value, list):
-        return "\n".join(f"• {v}" for v in value)
+        return "\n".join(f"    {v}" for v in value)
     if isinstance(value, dict):
         return "\n".join(f"{k}: {v}" for k, v in value.items())
-    return str(value) if value else ""
+    return str(value) if value is not None else ""
 
 
-# ── 模板占位符约定 ──────────────────────────────────────────────
+# ── 施工日志模板占位符约定 ──────────────────────────────────────
 
-# 施工日志模板推荐的占位符，用户模板中用这些即可自动填充
 LOG_PLACEHOLDERS = {
     "日期": "date",
     "天气": "weather",
@@ -105,7 +71,6 @@ def build_log_data(log_json: dict[str, Any]) -> dict[str, str]:
     for s in sections:
         heading = s.get("heading", "")
         content = s.get("content", "")
-        # 映射常见标题到模板占位符
         key = _map_heading(heading)
         data[key] = content
 

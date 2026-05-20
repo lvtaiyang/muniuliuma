@@ -82,6 +82,17 @@ try:
 except ImportError:
     pass
 
+# 加载实验报告模块
+try:
+    from src.experiment_report import report_generator, template_analyzer
+
+    MODULES["experiment_report"] = {
+        "name": "实验检测报告自动生成",
+        "tools": {},
+    }
+except ImportError:
+    pass
+
 APP = Server("muniuliuma")
 
 
@@ -142,11 +153,14 @@ async def tool_setup(groups: str = "", projects: str = "",
         conf.setdefault("wechat_monitor", {})["linked_project"] = project_name
 
     if api_key:
-        conf["llm"]["api_key"] = api_key
+        conf["llm"].setdefault("text", {})["api_key"] = api_key
+        conf["llm"].setdefault("vision", {})["api_key"] = api_key
     if base_url:
-        conf["llm"]["base_url"] = base_url
+        conf["llm"].setdefault("text", {})["base_url"] = base_url
+        conf["llm"].setdefault("vision", {})["base_url"] = base_url
     if model:
-        conf["llm"]["model"] = model
+        conf["llm"].setdefault("text", {})["model"] = model
+        conf["llm"].setdefault("vision", {})["model"] = model
     if archive_path:
         conf["archive"]["base_path"] = archive_path
 
@@ -159,7 +173,8 @@ async def tool_setup(groups: str = "", projects: str = "",
             "groups": conf.get("wechat_monitor", {}).get("groups", []),
             "linked_project": conf.get("wechat_monitor", {}).get("linked_project", ""),
             "projects": [p["name"] for p in conf.get("projects", [])],
-            "llm_model": conf["llm"]["model"],
+            "llm_text_model": conf.get("llm", {}).get("text", {}).get("model", ""),
+            "llm_vision_model": conf.get("llm", {}).get("vision", {}).get("model", ""),
             "archive_path": str(archive),
         },
         "warnings": errors,
@@ -193,7 +208,11 @@ async def tool_get_summary() -> str:
 async def tool_get_config() -> str:
     """查看当前配置。"""
     conf = cfg.load()
-    conf["llm"]["api_key"] = conf["llm"]["api_key"][:8] + "****" if conf["llm"].get("api_key") else "(未设置)"
+    # 脱敏处理
+    for key_type in ("text", "vision"):
+        sub = conf.get("llm", {}).get(key_type, {})
+        if sub.get("api_key"):
+            sub["api_key"] = sub["api_key"][:8] + "****"
     return json.dumps(conf, ensure_ascii=False, indent=2)
 
 
@@ -272,9 +291,9 @@ async def tool_project_update(name: str, updates_json: str) -> str:
 async def tool_template_analyze(file_path: str) -> str:
     """分析用户上传的文档模板（Word/Excel/PDF）。"""
     conf = cfg.load()
-    llm = conf["llm"]
+    llm = cfg.get_llm_config("text")
     if not llm.get("api_key"):
-        return json.dumps({"error": "未配置 LLM API key，请先执行 setup_monitoring 配置模型"}, ensure_ascii=False)
+        return json.dumps({"error": "未配置 LLM text.api_key，请先执行 setup_monitoring 配置模型"}, ensure_ascii=False)
     result = template_analyzer.analyze_document(
         file_path,
         base_url=llm["base_url"],
@@ -412,6 +431,96 @@ async def tool_read_log(project_name: str, filename: str) -> str:
     content = log_generator.read_log(project_name, filename)
     if content is None:
         return json.dumps({"error": f"日志不存在: {filename}"}, ensure_ascii=False)
+    return content
+
+
+# ── 实验报告工具 ────────────────────────────────────────────────
+
+async def tool_analyze_experiment_template(file_path: str) -> str:
+    """分析实验报告 xlsx 模板：逐单元格理解含义、数据来源、逻辑关系、不确定处生成确认问题。"""
+    result = template_analyzer.analyze_template(file_path)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def tool_confirm_template_analysis(
+    project_name: str, analysis_result_json: str,
+    answers_json: str, save_filename: str = "",
+) -> str:
+    """用回答确认模板分析中的不确定问题，确认后保存模板定义到项目。"""
+    try:
+        analysis_result = json.loads(analysis_result_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "analysis_result_json 不是有效 JSON"}, ensure_ascii=False)
+
+    confirmed = template_analyzer.confirm_template(analysis_result, answers_json)
+    if confirmed.get("error"):
+        return json.dumps(confirmed, ensure_ascii=False)
+
+    if confirmed.get("confirmed"):
+        saved = template_analyzer.save_template_definition(
+            project_name, confirmed, filename=save_filename,
+        )
+        confirmed["saved"] = saved
+
+    return json.dumps(confirmed, ensure_ascii=False, indent=2)
+
+
+async def tool_list_experiment_templates(project_name: str) -> str:
+    """列出项目已保存的实验报告模板定义。"""
+    templates = template_analyzer.list_template_definitions(project_name)
+    return json.dumps(templates, ensure_ascii=False, indent=2)
+
+
+async def tool_generate_experiment_report(
+    project_name: str, template_name: str,
+    ledger_paths_json: str, report_date: str = "",
+) -> str:
+    """用已确认的模板定义 + 台账数据生成实验报告（xlsx 格式）。"""
+    try:
+        paths = json.loads(ledger_paths_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "ledger_paths_json 不是有效 JSON"}, ensure_ascii=False)
+    result = report_generator.generate_from_template(
+        project_name=project_name,
+        template_name=template_name,
+        ledger_paths=paths,
+        report_date=report_date,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def tool_generate_single_experiment_report(
+    project_name: str, template_name: str,
+    test_item: str, ledger_paths_json: str,
+    report_date: str = "", extra_context: str = "",
+) -> str:
+    """用模板为特定检测项目生成单份实验报告（如钢筋原材力学性能检测报告）。"""
+    try:
+        paths = json.loads(ledger_paths_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "ledger_paths_json 不是有效 JSON"}, ensure_ascii=False)
+    result = report_generator.generate_single_from_template(
+        project_name=project_name,
+        template_name=template_name,
+        test_item=test_item,
+        ledger_paths=paths,
+        report_date=report_date,
+        extra_context=extra_context,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def tool_list_experiment_reports(project_name: str) -> str:
+    """列出项目已有的实验报告。"""
+    reports = report_generator.list_reports(project_name)
+    return json.dumps(reports, ensure_ascii=False, indent=2)
+
+
+async def tool_read_experiment_report(project_name: str, filename: str) -> str:
+    """读取一篇实验报告内容。xlsx 格式返回 Markdown 表格预览。"""
+    content = report_generator.read_report(project_name, filename)
+    if content is None:
+        return json.dumps({"error": f"报告不存在: {filename}"}, ensure_ascii=False)
     return content
 
 
@@ -658,6 +767,96 @@ TOOLS = [
             "required": ["project_name", "filename"],
         },
     ),
+    # ── 实验报告工具 ──
+    Tool(
+        name="analyze_experiment_template",
+        description="分析用户上传的实验报告 xlsx 模板。逐单元格/区域深度理解：每个格子填什么、数据从台账哪个字段来、单元格间的计算/判定逻辑。不确定的地方会生成具体问题让用户确认。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "xlsx 模板文件的绝对路径"},
+            },
+            "required": ["file_path"],
+        },
+    ),
+    Tool(
+        name="confirm_template_analysis",
+        description="回答模板分析中的不确定问题，确认后保存模板定义为可复用的实验报告模板。answers_json 格式: [{\"question_id\": \"q1\", \"answer\": \"...\"}] 或 [{\"region_id\": \"region_X\", \"resolution\": \"...\"}]。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+                "analysis_result_json": {"type": "string", "description": "analyze_experiment_template 返回的完整 JSON（可修改其中不确定的部分后再传入）"},
+                "answers_json": {"type": "string", "description": "对不确定问题的回答 JSON 数组"},
+                "save_filename": {"type": "string", "description": "保存的模板文件名，默认自动生成"},
+            },
+            "required": ["project_name", "analysis_result_json", "answers_json"],
+        },
+    ),
+    Tool(
+        name="list_experiment_templates",
+        description="列出项目已保存的实验报告模板定义。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+            },
+            "required": ["project_name"],
+        },
+    ),
+    Tool(
+        name="generate_experiment_report",
+        description="使用已确认的模板定义 + 实验检测台账，用 LLM 提取数据并填充 xlsx 模板生成实验报告。支持数据表行展开、逻辑判定计算。保存到项目工作区的 04_施工实施/实验检测报告/。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+                "template_name": {"type": "string", "description": "模板定义文件名（由 confirm_template_analysis 保存的）"},
+                "ledger_paths_json": {"type": "string", "description": "台账文件路径 JSON 数组: [\"/path/to/实验台账.xlsx\"]"},
+                "report_date": {"type": "string", "description": "报告日期 YYYY-MM-DD，默认今天"},
+            },
+            "required": ["project_name", "template_name", "ledger_paths_json"],
+        },
+    ),
+    Tool(
+        name="generate_single_experiment_report",
+        description="用模板为特定检测项目生成单份实验报告。如只生成'钢筋原材力学性能检测报告'，LLM 会从台账中只提取该检测项目的数据。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+                "template_name": {"type": "string", "description": "模板定义文件名"},
+                "test_item": {"type": "string", "description": "检测项目名称，如'钢筋原材力学性能检测'、'混凝土抗压强度检测'"},
+                "ledger_paths_json": {"type": "string", "description": "台账文件路径 JSON 数组"},
+                "report_date": {"type": "string", "description": "报告日期 YYYY-MM-DD，默认今天"},
+                "extra_context": {"type": "string", "description": "额外说明，如检测部位、批次信息等"},
+            },
+            "required": ["project_name", "template_name", "test_item", "ledger_paths_json"],
+        },
+    ),
+    Tool(
+        name="list_experiment_reports",
+        description="列出项目已生成的实验检测报告文件（xlsx/md）。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+            },
+            "required": ["project_name"],
+        },
+    ),
+    Tool(
+        name="read_experiment_report",
+        description="读取一篇实验报告内容。xlsx 格式报告以 Markdown 表格形式返回预览。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+                "filename": {"type": "string", "description": "报告文件名"},
+            },
+            "required": ["project_name", "filename"],
+        },
+    ),
 ]
 
 TOOL_MAP = {
@@ -687,6 +886,14 @@ TOOL_MAP = {
     "generate_log_from_ledgers": tool_generate_log_from_ledgers,
     "list_logs": tool_list_logs,
     "read_log": tool_read_log,
+    # 实验报告
+    "analyze_experiment_template": tool_analyze_experiment_template,
+    "confirm_template_analysis": tool_confirm_template_analysis,
+    "list_experiment_templates": tool_list_experiment_templates,
+    "generate_experiment_report": tool_generate_experiment_report,
+    "generate_single_experiment_report": tool_generate_single_experiment_report,
+    "list_experiment_reports": tool_list_experiment_reports,
+    "read_experiment_report": tool_read_experiment_report,
 }
 
 

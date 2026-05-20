@@ -1,13 +1,18 @@
-version: 0.0.1
+version: 0.0.2
 wechat_monitor:
   enabled: true
   groups: []
   last_run: null
   linked_project: ''
 llm:
-  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: ''
-  model: qwen-vl-max
+  text:
+    base_url: https://api.deepseek.com
+    api_key: ''
+    model: deepseek-v4-flash
+  vision:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: ''
+    model: qwen3.6-plus
 archive:
   base_path: ~/隐蔽验收影像资料
   naming: '{date}_{category}_{description}'

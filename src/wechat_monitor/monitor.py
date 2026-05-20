@@ -38,7 +38,7 @@ def run_monitor() -> MonitorResult:
             result.errors.append({"stage": "validation", "error": e})
         return result
 
-    llm_cfg = conf["llm"]
+    llm_cfg = cfg.get_llm_config("vision")
     archive_base = cfg.resolve_archive_path(conf)
     projects = conf["projects"]
     naming_template = conf["archive"].get("naming", "{date}_{category}_{description}")

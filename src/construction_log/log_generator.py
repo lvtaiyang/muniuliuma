@@ -66,7 +66,7 @@ def generate_from_images(
     读取当天归档的图片路径，送给多模态模型分析，生成日志。
     """
     conf = cfg.load()
-    llm = conf["llm"]
+    llm = cfg.get_llm_config("vision")
     archive_base = cfg.resolve_archive_path(conf)
 
     if not log_date:
@@ -120,7 +120,7 @@ def generate_from_ledgers(
 ) -> dict[str, Any]:
     """从台账文件生成施工日志。"""
     conf = cfg.load()
-    llm = conf["llm"]
+    llm = cfg.get_llm_config("text")
 
     if not log_date:
         log_date = date.today().isoformat()
@@ -217,8 +217,8 @@ def _save_log(project_name: str, log_date: str, log_data: dict[str, Any],
             md_path = log_dir / f"{log_date}_施工日志_预览.md"
             md_path.write_text(_render_log_markdown(log_data), encoding="utf-8")
             return path
-        except ImportError:
-            pass  # 无 python-docx，回退到 MD
+        except (ImportError, RuntimeError):
+            pass  # win32com/Word 不可用，回退到 MD
 
     # Fallback: Markdown
     md = _render_log_markdown(log_data)
