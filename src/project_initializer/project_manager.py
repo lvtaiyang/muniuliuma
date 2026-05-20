@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import json
 import yaml
 
 from .. import database
@@ -27,17 +28,52 @@ STAGE_LABELS = {
 
 
 def create(name: str, workspace: str, project_type: str = "",
-           current_stage: str = "", stages: list[str] | None = None, **meta) -> dict[str, Any]:
+           current_stage: str = "", stages: list[str] | None = None,
+           wbs_json: str = "", contract_json: str = "", **meta) -> dict[str, Any]:
     ws = Path(workspace).expanduser().resolve()
 
     categories = meta.pop("categories", None) or []
     stage_list = stages or DEFAULT_STAGES
+    if current_stage and current_stage not in stage_list:
+        stage_list = [current_stage] + stage_list
+
+    # 解析 WBS 和合同
+    wbs_tree = None
+    if wbs_json:
+        try:
+            data = json.loads(wbs_json)
+            wbs_tree = data.get("wbs", data if isinstance(data, list) else [])
+        except json.JSONDecodeError:
+            pass
+
+    contract = None
+    if contract_json:
+        try:
+            contract = json.loads(contract_json)
+            if isinstance(contract, dict) and "wbs" in contract:
+                if not wbs_tree:
+                    wbs_tree = contract.get("wbs", [])
+                contract = contract.get("contract", contract)
+        except json.JSONDecodeError:
+            pass
 
     project = database.save_project(
         name=name, workspace=str(ws), project_type=project_type,
         current_stage=current_stage, meta=meta, stages=stage_list,
         categories=categories,
     )
+
+    # 保存 WBS 和合同到数据库
+    if wbs_tree:
+        try:
+            database.save_wbs(name, wbs_tree)
+        except Exception:
+            pass
+    if contract:
+        try:
+            database.save_contract(name, contract)
+        except Exception:
+            pass
 
     # 创建工作区目录结构
     marker = ws / ".muniuliuma"
@@ -48,6 +84,12 @@ def create(name: str, workspace: str, project_type: str = "",
     _create_stage_dirs(ws, stage_list)
     (ws / "templates").mkdir(parents=True, exist_ok=True)
 
+    # 施工阶段 → 按分部分项创建资料子目录
+    if current_stage == "04_施工实施" and wbs_tree:
+        _create_wbs_dirs(ws / current_stage, wbs_tree)
+    elif current_stage == "04_施工实施":
+        _create_default_construction_dirs(ws / current_stage)
+
     return project
 
 
@@ -57,6 +99,37 @@ def _create_stage_dirs(workspace: Path, stages: list[str]) -> None:
         stage_dir.mkdir(parents=True, exist_ok=True)
         (stage_dir / "README.md").write_text(
             f"# {STAGE_LABELS.get(stage, stage)}\n", encoding="utf-8")
+
+
+def _create_wbs_dirs(base: Path, wbs: list[dict[str, Any]], depth: int = 0) -> None:
+    """按分部分项层级递归创建资料目录。最多展开3层，第4层不建子目录。"""
+    if depth >= 3:
+        return
+
+    DOC_SUBDIRS = ["隐蔽验收影像", "实验检测报告", "施工日志", "变更签证"]
+
+    for node in wbs:
+        code = node.get("code", "")
+        name = node.get("name", "")
+        dirname = f"{code}_{name}" if code else name
+        dirname = dirname.replace("/", "_").replace(" ", "").replace("\\", "_")[:80]
+        node_dir = base / dirname
+        node_dir.mkdir(parents=True, exist_ok=True)
+
+        children = node.get("children", [])
+        if children:
+            # 有子项 → 递归创建
+            _create_wbs_dirs(node_dir, children, depth + 1)
+        else:
+            # 叶子节点（分项工程/检验批） → 创建资料子目录
+            for sub in DOC_SUBDIRS:
+                (node_dir / sub).mkdir(parents=True, exist_ok=True)
+
+
+def _create_default_construction_dirs(stage_dir: Path) -> None:
+    """没有 WBS 时的默认施工资料目录。"""
+    for sub in ["隐蔽验收影像资料", "施工日志", "实验检测报告", "变更签证", "材料台账"]:
+        (stage_dir / sub).mkdir(parents=True, exist_ok=True)
 
 
 def list_projects() -> list[dict[str, Any]]:

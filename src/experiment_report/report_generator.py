@@ -443,21 +443,9 @@ def _read_xlsx_preview(path: Path) -> str:
 
 
 def _parse_response(content: str) -> dict[str, Any]:
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)\n?```", content)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-    match = re.search(r"\{[\s\S]*\}", content)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-    return {"report_data": {}, "data_table_rows": [],
-            "notes": f"LLM 返回格式异常: {content[:300]}"}
+    from .. import json_utils
+    result = json_utils.parse_llm_json(content)
+    if "_raw" in result:
+        return {"report_data": {}, "data_table_rows": [],
+                "notes": f"LLM 返回格式异常: {content[:300]}"}
+    return result

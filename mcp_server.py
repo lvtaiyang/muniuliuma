@@ -91,6 +91,17 @@ try:
 except ImportError:
     pass
 
+# 加载 WBS 解析器
+try:
+    from src.project_initializer import wbs_parser
+
+    MODULES["wbs_parser"] = {
+        "name": "分部分项解析",
+        "tools": {},
+    }
+except ImportError:
+    pass
+
 APP = Server("muniuliuma")
 
 
@@ -524,6 +535,31 @@ async def tool_read_experiment_report(project_name: str, filename: str) -> str:
 
 # ── 活动日志工具 ────────────────────────────────────────────────
 
+# ── 分部分项解析工具 ────────────────────────────────────────────
+
+async def tool_parse_project_document(file_path: str) -> str:
+    """解析项目文档（分部分项清单/合同/量单），返回结构化 WBS 和合同信息。"""
+    result = wbs_parser.parse_project_document(file_path)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def tool_parse_project_text(text: str, context: str = "") -> str:
+    """从用户文本描述中解析项目分部分项结构。"""
+    result = wbs_parser.parse_from_text(text, context)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def tool_get_project_wbs(project_name: str) -> str:
+    """获取项目的分部分项树。"""
+    wbs = database.get_wbs_tree(project_name)
+    contract = database.get_contract(project_name)
+    return json.dumps({
+        "project": project_name,
+        "wbs": wbs,
+        "contract": contract,
+    }, ensure_ascii=False, indent=2)
+
+
 async def tool_get_activity_log(
     limit: str = "20", tool_name: str = "",
     module: str = "", status: str = "",
@@ -640,7 +676,7 @@ TOOLS = [
     # ── 项目初始化工具 ──
     Tool(
         name="project_init",
-        description="创建新工程项目。指定工作区路径，自动搭建全流程 7 阶段目录结构（前期决策→设计准备→招标合同→施工实施→竣工验收→结算审计→后评估）。",
+        description="创建新工程项目。按阶段搭建目录，施工阶段按分部分项(WBS)创建资料子目录。wbs_json 为 parse_project_document 返回的 wbs 部分，contract_json 为合同部分。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -648,7 +684,9 @@ TOOLS = [
                 "workspace": {"type": "string", "description": "工作区绝对路径，如 /home/user/万科城市花园"},
                 "project_type": {"type": "string", "description": "项目类型：住宅/工业/市政/公路/水利/其他"},
                 "current_stage": {"type": "string", "description": "当前阶段代码，如 04_施工实施"},
-                "meta_json": {"type": "string", "description": "额外元数据 JSON: {\"总投资\":\"1.2亿\",\"工期\":\"24个月\"}"},
+                "meta_json": {"type": "string", "description": "额外元数据 JSON"},
+                "wbs_json": {"type": "string", "description": "分部分项 JSON（parse_project_document 返回的 wbs 数组或完整结果）"},
+                "contract_json": {"type": "string", "description": "合同信息 JSON（parse_project_document 返回的 contract 对象）"},
             },
             "required": ["name", "workspace"],
         },
@@ -739,6 +777,41 @@ TOOLS = [
                 "context": {"type": "string", "description": "实例场景描述，如'3号楼钢筋隐蔽验收'"},
             },
             "required": ["project_name", "template_name", "field_values_json"],
+        },
+    ),
+    # ── 分部分项解析工具 ──
+    Tool(
+        name="parse_project_document",
+        description="分析项目文档（合同/分部分项清单/工程量清单），用LLM提取合同关键信息和分部分项结构（单位工程→分部工程→分项工程→检验批）。支持xlsx/docx/csv/txt。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "文档文件路径"},
+            },
+            "required": ["file_path"],
+        },
+    ),
+    Tool(
+        name="parse_project_text",
+        description="从文本描述中解析项目分部分项结构。用户口头描述项目划分时使用。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "项目结构文本描述"},
+                "context": {"type": "string", "description": "补充说明，如项目类型"},
+            },
+            "required": ["text"],
+        },
+    ),
+    Tool(
+        name="get_project_wbs",
+        description="获取项目的分部分项树和合同信息。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "description": "项目名称"},
+            },
+            "required": ["project_name"],
         },
     ),
     # ── 影像资料整理工具 ──
@@ -923,6 +996,10 @@ TOOL_MAP = {
     "get_summary": tool_get_summary,
     "get_config": tool_get_config,
     "update_config": tool_update_config,
+    # 分部分项解析
+    "parse_project_document": tool_parse_project_document,
+    "parse_project_text": tool_parse_project_text,
+    "get_project_wbs": tool_get_project_wbs,
     # 项目初始化
     "project_init": tool_project_init,
     "project_list": tool_project_list,

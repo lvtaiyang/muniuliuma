@@ -65,6 +65,24 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS project_contract (
+            project_name TEXT PRIMARY KEY,
+            contract_json TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS project_wbs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            parent_id INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            code TEXT DEFAULT '',
+            name TEXT NOT NULL,
+            wbs_type TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS archives (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_name TEXT NOT NULL,
@@ -97,6 +115,8 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_calls_tool ON calls(tool_name);
         CREATE INDEX IF NOT EXISTS idx_calls_time ON calls(called_at);
         CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
+        CREATE INDEX IF NOT EXISTS idx_wbs_project ON project_wbs(project_name);
+        CREATE INDEX IF NOT EXISTS idx_wbs_parent ON project_wbs(parent_id);
     """)
     conn.commit()
 
@@ -472,6 +492,98 @@ def get_call_summary(since: str = "24h", session_id: str = "") -> dict[str, Any]
         "recent_tools": recent,
         "period": f"过去 {since}" if since else "全部",
     }
+
+
+# ── 合同信息 ────────────────────────────────────────────────────
+
+def save_contract(project_name: str, contract: dict[str, Any]) -> None:
+    conn = _get_conn()
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO project_contract (project_name, contract_json, created_at) VALUES (?, ?, ?)",
+        (project_name, json.dumps(contract, ensure_ascii=False), now),
+    )
+    conn.commit()
+
+
+def get_contract(project_name: str) -> dict[str, Any] | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT contract_json FROM project_contract WHERE project_name=?", (project_name,)).fetchone()
+    if row:
+        try:
+            return json.loads(row["contract_json"])
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+# ── 分部分项 (WBS) ─────────────────────────────────────────────
+
+def save_wbs(project_name: str, wbs_tree: list[dict[str, Any]]) -> None:
+    """保存分部分项树。逐节点递归写入。"""
+    conn = _get_conn()
+    now = datetime.now().isoformat()
+    conn.execute("DELETE FROM project_wbs WHERE project_name=?", (project_name,))
+    _insert_wbs_nodes(conn, project_name, wbs_tree, parent_id=0, now=now, sort=0)
+    conn.commit()
+
+
+def _insert_wbs_nodes(conn, project_name: str, nodes: list[dict[str, Any]], parent_id: int, now: str, sort: int) -> int:
+    for node in nodes:
+        conn.execute(
+            """INSERT INTO project_wbs (project_name, parent_id, level, code, name, wbs_type, sort_order, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (project_name, parent_id,
+             node.get("level", 1), node.get("code", ""), node["name"],
+             node.get("type", node.get("wbs_type", "")), sort, now),
+        )
+        node_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        sort += 1
+        children = node.get("children", [])
+        if children:
+            _insert_wbs_nodes(conn, project_name, children, node_id, now, 0)
+    return sort
+
+
+def get_wbs_tree(project_name: str) -> list[dict[str, Any]]:
+    """获取项目的分部分项树。"""
+    conn = _get_conn()
+    all_nodes = conn.execute(
+        "SELECT * FROM project_wbs WHERE project_name=? ORDER BY sort_order",
+        (project_name,),
+    ).fetchall()
+    if not all_nodes:
+        return []
+    node_map: dict[int, dict[str, Any]] = {}
+    roots = []
+    for row in all_nodes:
+        d = dict(row)
+        d["children"] = []
+        node_map[d["id"]] = d
+    for d in node_map.values():
+        pid = d["parent_id"]
+        if pid and pid in node_map:
+            node_map[pid]["children"].append(d)
+        else:
+            roots.append(d)
+    # 清理辅助字段
+    def clean(n):
+        n.pop("id", None); n.pop("parent_id", None)
+        n.pop("project_name", None); n.pop("created_at", None)
+        for c in n.get("children", []):
+            clean(c)
+        return n
+    return [clean(n) for n in roots]
+
+
+def get_wbs_flat(project_name: str) -> list[dict[str, Any]]:
+    """获取项目的分部分项平铺列表。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, parent_id, level, code, name, wbs_type FROM project_wbs WHERE project_name=? ORDER BY sort_order",
+        (project_name,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── helpers ─────────────────────────────────────────────────────
