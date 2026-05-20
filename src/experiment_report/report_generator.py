@@ -22,55 +22,53 @@ from .. import config as cfg
 from ..construction_log import ledger_reader
 from . import template_analyzer
 
-DATA_COMPLETION_PROMPT = """你是工程实验检测报告数据专家。根据数据映射表和台账，生成一份完整、可用的报告数据。
+DATA_COMPLETION_PROMPT = """你是工程实验检测报告数据专家。根据精确的数据映射表和台账数据，逐单元格生成完整的填充数据。
 
-## 数据映射表
+## 核心原则
 
-下表列出了报告中每一个需要填充的单元格。每行包含：
-- cell/region_id: 位置标识
-- purpose: 该位置的作用
-- data_type: fixed(固定值) / ledger(台账提取) / calculated(计算) / generated(需生成)
-- source: 数据来源说明
-- logic: 如有计算逻辑，这里描述
-
-## 你的任务
-
-1. **固定值**：直接使用 data_type=固定值 的值
-2. **台账提取**：从台账中找到对应的列/字段，精确提取。如果台账有多行匹配，全部提取
-3. **计算值**：根据 logic 描述的计算逻辑，用台账数据计算
-4. **需生成**：根据检测数据和行业知识生成（如检测结论、备注）。必须专业、规范。
-5. **数据补全**：台账可能不完整。从已有数据推断、从行业常识补充。确实无法确定的填"见原始记录"
-
-## 关键规则
-
-- 数据表的行数 = 台账中匹配的样品/测点数量，每行完整填写所有列
-- 根据逻辑规则自动判定（如 实测值>=标准值→合格）
-- 统计行（平均值、合格率、检测点数）必须根据数据行实际计算
-- 检测结论要完整、规范，包含检测依据、检测数量、检测结果、综合判定
-- 签名/日期行填入当前日期
-- 数值保留与台账一致的精度
+1. **映射表是权威的**：每个 region_id 对应模板中一个精确位置，你必须为每一个 region_id 返回值
+2. **台账是数据源**：所有能从台账提取的数值，精确提取，不要编造
+3. **计算值要真算**：不要估算，严格按 logic 列的计算公式
+4. **生成的值要专业**：检测结论等文本必须符合工程规范（JTG F80/1-2017等）
+5. **不能跳过任何行**：如果台账有10行数据，data_table_rows 必须返回10行
 
 ## 返回格式
 
 {
   "report_data": {
-    "region_id_1": "填充的值",
-    ...
+    "region_id_1": "值",
+    "region_id_2": "值",
+    ...所有region_id都必须有值...
   },
   "data_table_rows": [
-    {"col_A": "值", "col_B": "值", ...},
-    ...
+    {"col_A": "值1", "col_B": "值2", ...所有列都必须有值...},
+    {"col_A": "值1", "col_B": "值2", ...},
+    ...台账有多少行就返回多少行...
   ],
   "statistics": {
-    "total_points": 检测点数,
-    "qualified_points": 合格点数,
-    "qualification_rate": "合格率百分比",
-    "average_value": "平均值结果",
-    "representative_value": "代表值结果"
+    "total_points": 数值,
+    "qualified_points": 数值,
+    "qualification_rate": "百分比",
+    "average_value": 数值,
+    "representative_value": 数值
   },
-  "conclusion": "完整检测结论",
-  "notes": "数据来源和补充说明"
+  "conclusion": "完整规范的检测结论文本",
+  "missing_data": ["台账缺失但报告需要的字段列表"],
+  "notes": "数据来源说明"
 }
+
+## 缺失数据处理
+
+如果某个字段在台账中确实找不到，按以下优先级处理：
+1. 从模板已有示例值推断 → 填入
+2. 从其他台账列推断 → 填入
+3. 是行业标准固定值 → 填入标准值
+4. 确实无法确定 → 在 report_data 中填 "见原始记录"，同时在 missing_data 中列出
+
+## 警告
+- DO NOT skip any region_id from the mapping table
+- DO NOT return fewer data_table_rows than available in ledger
+- 每个统计值必须基于实际数据行计算
 """
 
 
@@ -143,6 +141,17 @@ def generate_from_template(
     )
 
     extracted = _parse_response(response.choices[0].message.content or "")
+
+    # 4.5 完整性校验：检查映射表中的 region 是否都被填充
+    expected_regions = _collect_region_ids(tmpl_def)
+    filled_regions = set(extracted.get("report_data", {}).keys())
+    missing = expected_regions - filled_regions
+    if missing:
+        # 补填缺失的 region
+        for rid in missing:
+            val = _infer_default_value(rid, tmpl_def)
+            if val:
+                extracted.setdefault("report_data", {})[rid] = val
 
     # 5. 通过 win32com 填充 xlsx（保留原生格式）
     source_file = tmpl_def.get("source_file", "")
@@ -240,6 +249,14 @@ def generate_single_from_template(
     )
 
     extracted = _parse_response(response.choices[0].message.content or "")
+
+    # 完整性校验
+    expected_regions = _collect_region_ids(tmpl_def)
+    filled_regions = set(extracted.get("report_data", {}).keys())
+    for rid in expected_regions - filled_regions:
+        val = _infer_default_value(rid, tmpl_def)
+        if val:
+            extracted.setdefault("report_data", {})[rid] = val
 
     source_file = tmpl_def.get("source_file", "")
     if not source_file or not Path(source_file).exists():
@@ -508,6 +525,29 @@ def _read_xlsx_preview(path: Path) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"无法读取 xlsx: {e}"
+
+
+def _collect_region_ids(tmpl_def: dict[str, Any]) -> set[str]:
+    """收集模板中所有需要填充的 region_id。"""
+    ids = set()
+    for sheet in tmpl_def.get("sheets", []):
+        for r in sheet.get("regions", []):
+            if r.get("type") not in ("data_table_header", "data_table_body"):
+                ids.add(r.get("id", ""))
+    ids.discard("")
+    return ids
+
+
+def _infer_default_value(rid: str, tmpl_def: dict[str, Any]) -> str | None:
+    """对 LLM 遗漏的 region，尝试从模板定义推断默认值。"""
+    for sheet in tmpl_def.get("sheets", []):
+        for r in sheet.get("regions", []):
+            if r.get("id") == rid:
+                if r.get("fixed_value"):
+                    return r["fixed_value"]
+                if r.get("data_source") == "fixed_value":
+                    return r.get("data_source_detail", "")
+    return "见原始记录"
 
 
 def _parse_response(content: str) -> dict[str, Any]:
