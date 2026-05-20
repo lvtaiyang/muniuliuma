@@ -533,6 +533,69 @@ async def tool_read_experiment_report(project_name: str, filename: str) -> str:
     return content
 
 
+# ── 纯 I/O 工具（智能体驱动，不调 LLM）─────────────────────────
+
+async def tool_read_template_cells(file_path: str) -> str:
+    """读取 xlsx 模板的所有单元格位置和内容。纯数据提取，不调 LLM。智能体拿到后自己分析结构、匹配台账列、决定填充内容。"""
+    from src import win32_helper
+    result = win32_helper.excel_read_structure(file_path)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def tool_fill_template_cells(
+    template_path: str, output_path: str, cell_values_json: str,
+) -> str:
+    """向 xlsx 模板指定单元格写入值并另存。纯数据操作。
+
+    cell_values_json:
+      {"Sheet1": {"A3": "填的值", "B5": "填的值"}, "Sheet2": {"C1": "值"}}
+      或 {"cells": {"A1": "值", "B2": "值"}}
+    """
+    from src import win32_helper
+    try:
+        values = json.loads(cell_values_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "cell_values_json 不是有效 JSON"}, ensure_ascii=False)
+
+    tp = Path(template_path)
+    op = Path(output_path)
+    if not tp.exists():
+        return json.dumps({"error": f"模板不存在: {tp}"}, ensure_ascii=False)
+    op.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        fill_data = _build_simple_fill_data(values)
+        win32_helper.excel_fill_template(tp, op, fill_data)
+        return json.dumps({"saved": str(op), "cells_written": _count_cells(values)}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": f"填充失败: {e}"}, ensure_ascii=False)
+
+
+def _build_simple_fill_data(values: dict[str, Any]) -> dict[str, Any]:
+    cells = values.get("cells", {})
+    sheets = []
+    if not cells:
+        for sname, svals in values.items():
+            if isinstance(svals, dict):
+                regions = [{"id": f"c_{cr}", "cells": cr, "fixed_value": str(v),
+                            "data_source": "fixed_value", "confidence": "high"}
+                           for cr, v in svals.items()]
+                sheets.append({"sheet_name": sname, "sheet_role": "main_report",
+                               "regions": regions, "data_table": {}})
+    else:
+        regions = [{"id": f"c_{cr}", "cells": cr, "fixed_value": str(v),
+                    "data_source": "fixed_value", "confidence": "high"}
+                   for cr, v in cells.items()]
+        sheets = [{"sheet_name": "", "sheet_role": "main_report", "regions": regions, "data_table": {}}]
+    return {"sheets": sheets, "report_data": {}, "data_table_rows": [], "logic_rules": []}
+
+
+def _count_cells(values: dict[str, Any]) -> int:
+    cells = values.get("cells", {})
+    if cells: return len(cells)
+    return sum(len(v) for v in values.values() if isinstance(v, dict))
+
+
 # ── 活动日志工具 ────────────────────────────────────────────────
 
 # ── 分部分项解析工具 ────────────────────────────────────────────
@@ -591,6 +654,31 @@ async def tool_get_activity_summary(since: str = "24h") -> str:
 
 TOOLS = [
     # ── 系统工具 ──
+    # ── 纯 I/O 工具（智能体驱动）──
+    Tool(
+        name="read_template_cells",
+        description="读取 xlsx 模板的所有单元格位置和内容（纯数据，不调 LLM）。智能体拿到原始数据后自己分析结构、匹配合账、决定填充内容。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "xlsx 文件路径"},
+            },
+            "required": ["file_path"],
+        },
+    ),
+    Tool(
+        name="fill_template_cells",
+        description="向 xlsx 模板的指定单元格写入值并另存（纯数据操作，不调 LLM）。cell_values_json 格式: {\"Sheet1\": {\"A3\": \"值\", \"B5\": \"值\"}} 或 {\"cells\": {\"A1\": \"值\"}}",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "template_path": {"type": "string", "description": "模板 xlsx 路径"},
+                "output_path": {"type": "string", "description": "输出 xlsx 路径"},
+                "cell_values_json": {"type": "string", "description": "单元格值 JSON"},
+            },
+            "required": ["template_path", "output_path", "cell_values_json"],
+        },
+    ),
     Tool(
         name="get_activity_log",
         description="查询 MCP 工具调用历史日志。智能体在开始任务前应先查看此日志，了解之前做了什么、避免重复运行。支持按工具名、模块、状态、时间过滤。",
@@ -986,6 +1074,8 @@ TOOLS = [
 
 TOOL_MAP = {
     # 活动日志
+    "read_template_cells": tool_read_template_cells,
+    "fill_template_cells": tool_fill_template_cells,
     "get_activity_log": tool_get_activity_log,
     "get_activity_summary": tool_get_activity_summary,
     "check_wechat_setup": tool_check_setup,

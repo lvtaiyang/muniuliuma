@@ -22,45 +22,43 @@ from .. import config as cfg
 from ..construction_log import ledger_reader
 from . import template_analyzer
 
-DATA_COMPLETION_PROMPT = """你是工程实验检测报告数据专家。根据数据映射表和两类数据源，逐单元格生成完整的填充数据。
+DATA_COMPLETION_PROMPT = """你是工程实验检测报告数据专家。根据数据映射表和台账数据，逐单元格生成完整的填充数据。
 
-## 两类数据源
+## 重要：模板中的数字只是示例
 
-1. **台账数据**：检测计划/路段信息（桩号、部位、设计指标、施工日期等元数据）
-2. **raw_data原始检测数据**：模板自带工作表里的实测值、计算过程、中间数据（如压实度%、含水率、干密度等）
+模板 xlsx 中的数值（如 0.98、98.1%）只是展示格式的占位数据，不是真实检测结果。
+你需要根据映射表中每个单元格的数据类型，从台账中提取真实数据填入。
 
-## 核心原则
+## 数据来源优先级
 
-1. **映射表是权威的**：每个 region_id 对应模板中一个精确位置，必须全部返回
-2. **实测值从raw_data取**：压实度、含水率、干密度等实测值从"原始检测数据"中提取
-3. **元数据从台账取**：桩号、部位、设计标准等从台账中提取
-4. **计算值要真算**：统计值（平均值、合格率等）根据提取的实测值严格计算
-5. **固定值直接用**：检测依据、判定标准等固定值直接填入
-6. **不能跳过任何行**：raw_data有几个测点，data_table_rows 就返回几行
+1. **台账提取**：台账中有对应列的数据 → 直接提取
+2. **计算得出**：映射表标注为 calculated 的 → 根据 logic 列的计算公式，用台账数据真算
+3. **固定值**：映射表标注为 fixed_value 的 → 直接使用固定值
+4. **LLM 生成**：映射表标注为 generated/manual_input 的 → 根据行业规范生成（检测结论、备注等）
+5. **无法确定**：台账没有、无法计算、也无法生成的 → 填 "见原始记录"，记录到 missing_data
+
+## 数据行规则
+
+- 台账中每个匹配的样品/路段 → 数据表一行
+- 如果台账没有实测数据，按台账的设计指标填入标准要求列，实测值列填"待检测"
 
 ## 返回格式
 
 {
   "report_data": { "region_id_1": "值", ...每个region_id都有值... },
   "data_table_rows": [
-    {"col_A": "值1", "col_B": "值2", ...},
-    ...raw_data有多少个测点就返回多少行...
+    {"col_A": "值1", "col_B": "值2", ...所有列都有值...},
+    ...
   ],
-  "statistics": {
-    "total_points": 检测点数,
-    "qualified_points": 合格点数,
-    "qualification_rate": "百分比",
-    "average_value": 平均值,
-    "representative_value": 代表值
-  },
+  "statistics": { "total_points": N, "qualified_points": N, "qualification_rate": "百分比", "average_value": N, "representative_value": N },
   "conclusion": "完整规范的检测结论",
-  "missing_data": ["确实无法确定的字段"],
+  "missing_data": ["无法确定的字段"],
   "notes": "数据来源说明"
 }
 
 ## 警告
-- 实测值必须从raw_data提取，台账只有路段元数据
-- 统计值真实计算，不编造
+- 不要从模板中提取数值，模板数值只是示例
+- 数据必须从台账提取或根据台账计算
 """
 
 
@@ -100,42 +98,31 @@ def generate_from_template(
     if not ledger_text.strip():
         return {"error": "台账文件为空或无法读取"}
 
-    # 3. 读取模板中的 raw_data 工作表数据（模板自带原始检测数据）
-    source_file = tmpl_def.get("source_file", "")
-    raw_data_text = ""
-    if source_file and Path(source_file).exists():
-        raw_data_text = _extract_raw_data(source_file)
-
-    # 4. 构建数据映射表：每个需填充的单元格 + 类型 + 来源 + 逻辑
+    # 3. 构建数据映射表：每个需填充的单元格 + 类型 + 来源 + 逻辑
     data_mapping = _build_data_mapping(tmpl_def)
 
-    # 5. LLM 数据补全：映射表 + 台账 + raw_data → 完整报告数据
+    # 4. LLM 数据补全：映射表 + 台账 → 完整报告数据
     conf = cfg.load()
     llm = cfg.get_llm_config("text")
     client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=300)
 
-    # 动态 max_tokens
-    total_lines = len(ledger_text.split("\n")) + len(raw_data_text.split("\n"))
-    row_estimate = max(5, min(80, total_lines // 2))
+    row_estimate = max(5, min(80, len(ledger_text.split("\n")) // 2))
     max_tok = max(4000, row_estimate * 400)
-
-    raw_section = f"## 模板内原始检测数据\n\n{raw_data_text[:10000]}\n\n" if raw_data_text else ""
 
     response = client.chat.completions.create(
         model=llm["model"],
         messages=[
             {"role": "system", "content": DATA_COMPLETION_PROMPT},
             {"role": "user", "content": (
-                f"## 数据映射表\n\n{data_mapping}\n\n"
-                f"## 台账数据（检测计划/路段信息）\n\n{ledger_text[:12000]}\n\n"
-                f"{raw_section}"
+                f"## 数据映射表（模板中所有需填充的单元格）\n\n{data_mapping}\n\n"
+                f"## 台账数据（真实数据源）\n\n{ledger_text[:15000]}\n\n"
                 f"## 生成要求\n"
                 f"- 报告日期: {report_date}\n"
                 f"- 项目名称: {project_name}\n"
-                f"- 重要：从raw_data原始检测数据中提取压实度等实测值，台账只提供路段/部位/设计指标\n"
-                f"- 数据表每一行对应raw_data中的一个测点\n"
-                f"- 统计值（平均值、合格率等）根据数据行实际计算\n"
-                f"- 检测结论要完整规范，包含检测依据、检测数量、结果和判定\n"
+                f"- 模板中的数值只是示例,不要提取,真实数据必须从台账来\n"
+                f"- 数据表按台账中匹配的行数展开\n"
+                f"- 统计值根据数据行实际计算\n"
+                f"- 检测结论要完整规范\n"
             )},
         ],
         max_tokens=max_tok,
@@ -226,11 +213,6 @@ def generate_single_from_template(
     if not ledger_text.strip():
         return {"error": "台账文件为空或无法读取"}
 
-    source_file = tmpl_def.get("source_file", "")
-    raw_data_text = ""
-    if source_file and Path(source_file).exists():
-        raw_data_text = _extract_raw_data(source_file)
-
     data_mapping = _build_data_mapping(tmpl_def)
 
     conf = cfg.load()
@@ -238,10 +220,7 @@ def generate_single_from_template(
     client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=300)
 
     ctx = f"\n\n额外说明: {extra_context}" if extra_context else ""
-    total_lines = len(ledger_text.split("\n")) + len(raw_data_text.split("\n"))
-    max_tok = max(4000, max(5, min(80, total_lines // 2)) * 400)
-
-    raw_section = f"## 模板内原始检测数据\n\n{raw_data_text[:10000]}\n\n" if raw_data_text else ""
+    max_tok = max(4000, max(5, min(80, len(ledger_text.split("\n")) // 2)) * 400)
 
     response = client.chat.completions.create(
         model=llm["model"],
@@ -250,8 +229,7 @@ def generate_single_from_template(
             {"role": "user", "content": (
                 f"只提取检测项目为「{test_item}」的数据。{ctx}\n\n"
                 f"## 数据映射表\n\n{data_mapping}\n\n"
-                f"## 台账数据\n\n{ledger_text[:12000]}\n\n"
-                f"{raw_section}"
+                f"## 台账数据\n\n{ledger_text[:15000]}\n\n"
                 f"报告日期: {report_date}"
             )},
         ],
@@ -536,24 +514,6 @@ def _read_xlsx_preview(path: Path) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"无法读取 xlsx: {e}"
-
-
-def _extract_raw_data(source_file: str | Path) -> str:
-    """提取模板中 raw_data 工作表的原始检测数据作为数据源。"""
-    from .. import win32_helper
-    try:
-        structure = win32_helper.excel_read_structure(source_file)
-        if "error" in structure:
-            return ""
-        lines = []
-        for sheet in structure.get("sheets", []):
-            lines.append(f"### 工作表: {sheet.get('name', '')}")
-            for row_info in sheet.get("rows", []):
-                cells = [f"{c['cell']}:{c['value']}" for c in row_info.get("cells", [])]
-                lines.append("; ".join(cells))
-        return "\n".join(lines)
-    except Exception:
-        return ""
 
 
 def _collect_region_ids(tmpl_def: dict[str, Any]) -> set[str]:
