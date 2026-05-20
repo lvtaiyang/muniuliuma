@@ -213,6 +213,13 @@ def analyze_template(file_path: str | Path) -> dict[str, Any]:
         }]
         result.setdefault("cross_sheet_logic", [])
 
+    # 自动审核：问题太多时，LLM 自审消化"过度谨慎"的问题
+    if uncertain_count >= 5 and not isinstance(result.get("_raw"), str):
+        try:
+            result = _auto_review_uncertainties(result, xlsx_structure, llm)
+        except Exception:
+            pass
+
     return result
 
 
@@ -378,6 +385,108 @@ def _build_analysis_prompt(filename: str, structure: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+
+
+AUTO_REVIEW_PROMPT = """你是一个工程实验报告模板审核专家。之前已经分析了这份模板，产生了一些不确定的问题。
+
+现在请你重新审视每个问题。很多问题其实可以从模板本身的结构和已有数据分析出来——只是第一次分析时过于谨慎。
+
+对每个问题，判断：
+1. **可以自动回答** → 结合模板数据给出确定答案，标记 auto_resolved: true
+2. **真不确定** → 保留问题，标记 auto_resolved: false
+
+## 常见可自动消化的情况
+- 两个单元格的值相同，可以推断是同一个数据源
+- 模板里本身已经标注了单位、标准号、计算公式
+- 合并单元格范围已经暗示了字段类型
+- 表头行下面的空白行是预留的数据行
+- 签名区的"检测/审核/批准"格式是固定的，不需要验证
+
+## 返回格式
+[
+  {"question_id": "q1", "auto_resolved": true, "resolution": "根据模板分析: ..."},
+  {"question_id": "q2", "auto_resolved": false, "reason": "确实需要用户确认: ..."}
+]
+
+每个 problem 必须有一个判断，不能跳过。"""
+
+
+def _auto_review_uncertainties(
+    analysis: dict[str, Any],
+    xlsx_structure: dict[str, Any],
+    llm: dict[str, str],
+) -> dict[str, Any]:
+    """LLM 自审不确定问题，自动消化可确认的。"""
+    uncertainties = analysis.get("uncertainties", [])
+    if not uncertainties:
+        return analysis
+
+    # 构建简洁的上下文：只发细胞格位置 + 问题列表
+    context_parts = ["## 模板结构摘要"]
+    for sheet in xlsx_structure.get("sheets", [])[:3]:
+        cells = []
+        for row_info in sheet.get("rows", []):
+            for c in row_info["cells"]:
+                cells.append(f"{c['cell']}:{c['value']}")
+        context_parts.append(f"\n### {sheet['name']}")
+        context_parts.append("; ".join(cells[:80]))
+
+    questions_text = json.dumps([
+        {"question_id": u.get("id", f"q{i}"), "question": u.get("question", ""),
+         "context": u.get("context", ""), "sheet_name": u.get("sheet_name", "")}
+        for i, u in enumerate(uncertainties)
+    ], ensure_ascii=False, indent=2)
+
+    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=120)
+
+    response = client.chat.completions.create(
+        model=llm["model"],
+        messages=[
+            {"role": "system", "content": AUTO_REVIEW_PROMPT},
+            {"role": "user", "content": (
+                f"## 模板结构\n{chr(10).join(context_parts)}\n\n"
+                f"## 需要审核的问题\n{questions_text}\n\n"
+                f"请逐个审核，能自动确定的给出答案，真不确定的保留。"
+            )},
+        ],
+        max_tokens=3000,
+        temperature=0.1,
+    )
+
+    review = json_utils.parse_llm_json(response.choices[0].message.content or "")
+    if isinstance(review, dict):
+        review = review.get("_list", [review])
+    if not isinstance(review, list):
+        return analysis
+
+    # 合并审核结果
+    review_map = {r.get("question_id", ""): r for r in review}
+    resolved = []
+    still_uncertain = []
+    auto_count = 0
+
+    for u in uncertainties:
+        uid = u.get("id", "")
+        rev = review_map.get(uid, {})
+        if rev.get("auto_resolved"):
+            u["auto_resolved"] = True
+            u["resolution"] = rev.get("resolution", "")
+            u["resolved"] = True
+            resolved.append(u)
+            auto_count += 1
+        else:
+            u["auto_resolved"] = False
+            u["resolved"] = False
+            still_uncertain.append(u)
+
+    analysis["uncertainties"] = still_uncertain  # 仅保留仍不确定的
+    analysis["auto_resolved_uncertainties"] = resolved
+    analysis["auto_resolved_count"] = auto_count
+    analysis["confirmation_required"] = len(still_uncertain)
+    analysis["needs_confirmation"] = len(still_uncertain) > 0
+    analysis["auto_reviewed"] = True
+
+    return analysis
 
 
 def _parse_response(content: str) -> dict[str, Any]:
