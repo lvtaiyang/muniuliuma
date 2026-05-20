@@ -160,7 +160,9 @@ def analyze_template(file_path: str | Path) -> dict[str, Any]:
     conf = cfg.load()
     llm = cfg.get_llm_config("text")
     if not llm.get("api_key"):
-        return {"error": "未配置 LLM API key，请先 setup_monitoring"}
+        return {"error": "未配置 LLM text API Key，无法调用 LLM 分析模板。"
+                "请改用纯 I/O 路径: 用 read_template_cells 读取模板原始数据，你自己分析结构，然后用 fill_template_cells 写入。"
+                "不需要 API Key。"}
 
     # 读取 xlsx 完整结构
     xlsx_structure = _read_xlsx_structure(file_path)

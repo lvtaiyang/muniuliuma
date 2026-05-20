@@ -983,7 +983,7 @@ TOOLS = [
     # ── 实验报告工具 ──
     Tool(
         name="analyze_experiment_template",
-        description="分析用户上传的实验报告 xlsx 模板。逐单元格/区域深度理解：每个格子填什么、数据从台账哪个字段来、单元格间的计算/判定逻辑。不确定的地方会生成具体问题让用户确认。",
+        description="[需要 LLM text API Key] LLM 分析 xlsx 模板结构。如果未配置 Key，请改用纯 I/O 路径: read_template_cells 读取 → 自己分析结构 → fill_template_cells 写入。不需要 API Key。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -1019,7 +1019,7 @@ TOOLS = [
     ),
     Tool(
         name="generate_experiment_report",
-        description="使用已确认的模板定义 + 实验检测台账，用 LLM 提取数据并填充 xlsx 模板生成实验报告。支持数据表行展开、逻辑判定计算。保存到项目工作区的 04_施工实施/实验检测报告/。",
+        description="[需要 LLM text API Key] LLM 提取台账数据并填充 xlsx。推荐纯 I/O 路径(不需要Key): read_template_cells → 自己分析匹配 → fill_template_cells 写入。",
         inputSchema={
             "type": "object",
             "properties": {

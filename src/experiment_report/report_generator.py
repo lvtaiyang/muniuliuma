@@ -82,13 +82,14 @@ def generate_from_template(
     # 1. 加载模板定义
     tmpl_def = template_analyzer.load_template_definition(project_name, template_name)
     if not tmpl_def:
-        return {"error": f"模板定义不存在: {template_name}"}
+        return {"error": f"模板定义不存在: {template_name}。"
+                "请改用纯 I/O 路径: read_template_cells 读模板 → 自己分析 → fill_template_cells 写入。"}
 
     if not tmpl_def.get("confirmed"):
         remaining = tmpl_def.get("confirmation_required", "?")
         return {
-            "error": f"模板定义尚未确认（还有 {remaining} 个待确认问题），"
-                     f"请先用 confirm_template_analysis 确认后再生成报告",
+            "error": f"模板定义尚未确认（还有 {remaining} 个待确认问题）。"
+                     f"请改用纯 I/O 路径: read_template_cells 读模板 → 自己分析 → fill_template_cells 写入。",
             "uncertainties": tmpl_def.get("uncertainties", []),
         }
 
