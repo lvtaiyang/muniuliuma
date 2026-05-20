@@ -11,25 +11,46 @@
 - Node.js >= 14（仅模块 2 微信监控需要，自动检测安装）
 - Windows + Office/WPS（仅 Word/Excel 模板填充需要，非 Windows 环境走 openpyxl 回退）
 
-## 安装
+## 快速接入（给其他智能体使用）
+
+### 1. 下载安装
 
 ```bash
-git clone <repo-url> muniuliuma && cd muniuliuma
-
-# 核心安装
-pip install -e .
-
-# 全部可选依赖
+git clone https://github.com/lvtaiyang/muniuliuma.git
+cd muniuliuma
 pip install -e ".[full]"
-
-# 或按需安装
-pip install -e ".[docx]"    # Word 模板填充（回退模式）
-pip install -e ".[xlsx]"    # Excel 回退模式
-pip install -e ".[pdf]"     # PDF 文档分析
 ```
 
-### MCP 配置
+按需安装：
+```bash
+pip install -e .                  # 核心
+pip install -e ".[docx]"          # Word 模板填充（回退模式）
+pip install -e ".[xlsx]"          # Excel 回退模式
+pip install -e ".[win32]"         # Windows COM 自动化（推荐）
+pip install -e ".[pdf]"           # PDF 文档分析
+```
 
+### 2. 配置 API Key
+
+编辑 `config.yaml`，填入自己的模型 key：
+
+```yaml
+llm:
+  text:       # 纯文本
+    api_key: sk-your-deepseek-key
+  vision:     # 多模态
+    api_key: sk-your-qwen-key
+```
+
+MCP Server 内部自动按任务类型选择模型，一次配置所有调用方共用。主智能体不需要关心模型的事。
+
+### 3. 在智能体框架中注册
+
+**Claude Code** — 命令行添加：
+```bash
+claude mcp add muniuliuma -- python /path/to/muniuliuma/mcp_server.py
+```
+或手动编辑 `~/.claude/mcp.json`：
 ```json
 {
   "mcpServers": {
@@ -41,23 +62,21 @@ pip install -e ".[pdf]"     # PDF 文档分析
 }
 ```
 
-### 模型配置
-
-config.yaml 中分别配置纯文本和多模态模型：
-
-```yaml
-llm:
-  text:       # 纯文本：模板分析、文档生成、数据提取、台账解析
-    base_url: https://api.deepseek.com
-    api_key: sk-xxx
-    model: deepseek-v4-flash
-  vision:     # 多模态：照片分析、影像分类、施工图识别
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    api_key: sk-xxx
-    model: qwen3.6-plus
+**Cursor** — 编辑 `.cursor/mcp.json`：
+```json
+{
+  "mcpServers": {
+    "muniuliuma": {
+      "command": "python",
+      "args": ["/path/to/muniuliuma/mcp_server.py"]
+    }
+  }
+}
 ```
 
-MCP Server 内部自动按任务类型选择模型，主智能体无需关心。一次配置，所有调用方共用。
+**Dify / 其他支持 MCP 的框架** — 同样的 stdio MCP 协议，配置格式一致。
+
+注册后重启智能体，即可自动发现全部 30 个工具。
 
 ---
 
