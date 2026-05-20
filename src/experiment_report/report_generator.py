@@ -296,66 +296,78 @@ def _fill_xlsx(
 
     with win32_helper.open_excel(template_path) as (app, wb, app_name):
         is_com = win32_helper.WIN32_AVAILABLE and app is not None
+        sheets_def = template_def.get("sheets", [])
+        # 向后兼容旧格式
+        if not sheets_def:
+            sheets_def = [{"sheet_name": "", "regions": template_def.get("regions", []),
+                           "data_table": template_def.get("data_table", {})}]
 
-        # 获取目标工作表
-        if is_com:
-            ws = wb.Worksheets(1)
-        else:
-            ws = wb.active
-
-        # 1. 填充固定区域
-        for region in template_def.get("regions", []):
-            cells = region.get("cells", "")
-            rid = region.get("id", "")
-            value = report_data.get(rid, "")
-
-            if not value and region.get("fixed_value"):
-                value = region["fixed_value"]
-            if not value:
-                continue
-
-            target_cell = cells.split(":")[0] if ":" in cells else cells
+        for si, sheet_def in enumerate(sheets_def):
+            sname = sheet_def.get("sheet_name", "")
             try:
                 if is_com:
-                    ws.Range(target_cell).Value = value
+                    ws = wb.Worksheets(sname) if sname else wb.Worksheets(si + 1)
                 else:
-                    _write_cell_ol(ws, target_cell, value)
+                    ws = wb[sname] if sname and sname in wb.sheetnames else wb.active
             except Exception:
-                pass
-
-        # 2. 填充数据表
-        data_table = template_def.get("data_table", {})
-        if data_table and data_table_rows:
-            header_row = data_table.get("data_start_row", data_table.get("header_row", 5) + 1)
-            columns = data_table.get("columns", [])
-
-            if is_com and len(data_table_rows) > 1:
-                for i in range(1, len(data_table_rows)):
-                    ws.Rows(header_row).Insert()
-            elif not is_com and len(data_table_rows) > 1:
-                ws.insert_rows(header_row, len(data_table_rows) - 1)
-
-            for i, row_data in enumerate(data_table_rows):
-                current_row = header_row + i
-                for col_def in columns:
-                    col_letter = col_def.get("col_letter", "")
-                    if not col_letter:
-                        continue
-                    value = row_data.get(col_letter, row_data.get(col_def.get("header_text", ""), ""))
-                    try:
-                        if is_com:
-                            ws.Range(f"{col_letter}{current_row}").Value = value
-                        else:
-                            _write_cell_ol(ws, f"{col_letter}{current_row}", value)
-                    except Exception:
-                        pass
-
-        # 3. 应用逻辑规则
-        logic_rules = template_def.get("logic_rules", [])
-        for rule in logic_rules:
-            if rule.get("confidence") != "high":
                 continue
-            _apply_logic_rule(ws, rule, data_table, data_table_rows, is_com)
+
+            # 1. 填充固定区域
+            for region in sheet_def.get("regions", []):
+                cells = region.get("cells", "")
+                rid = region.get("id", "")
+                value = report_data.get(rid, "")
+
+                if not value and region.get("fixed_value"):
+                    value = region["fixed_value"]
+                if not value:
+                    continue
+
+                target_cell = cells.split(":")[0] if ":" in cells else cells
+                try:
+                    if is_com:
+                        ws.Range(target_cell).Value = value
+                    else:
+                        _write_cell_ol(ws, target_cell, value)
+                except Exception:
+                    pass
+
+            # 2. 填充数据表（仅 main_report 工作表）
+            data_table = sheet_def.get("data_table", {})
+            if data_table and data_table_rows and sheet_def.get("sheet_role") == "main_report":
+                header_row = data_table.get("data_start_row", data_table.get("header_row", 5) + 1)
+                columns = data_table.get("columns", [])
+
+                if is_com and len(data_table_rows) > 1:
+                    for i in range(1, len(data_table_rows)):
+                        ws.Rows(header_row).Insert()
+                elif not is_com and len(data_table_rows) > 1:
+                    ws.insert_rows(header_row, len(data_table_rows) - 1)
+
+                for i, row_data in enumerate(data_table_rows):
+                    current_row = header_row + i
+                    for col_def in columns:
+                        col_letter = col_def.get("col_letter", "")
+                        if not col_letter:
+                            continue
+                        value = row_data.get(col_letter, row_data.get(col_def.get("header_text", ""), ""))
+                        try:
+                            if is_com:
+                                ws.Range(f"{col_letter}{current_row}").Value = value
+                            else:
+                                _write_cell_ol(ws, f"{col_letter}{current_row}", value)
+                        except Exception:
+                            pass
+
+            # 3. 应用逻辑规则
+            logic_rules = template_def.get("logic_rules", [])
+            for rule in logic_rules:
+                if rule.get("confidence") != "high":
+                    continue
+                rule_sheet = rule.get("applies_in_sheet", "")
+                if rule_sheet and rule_sheet != sname:
+                    continue  # 此规则不属于当前工作表和
+                _apply_logic_rule(ws, rule, data_table, data_table_rows, is_com)
 
         # 4. 另存
         win32_helper.excel_save_as(wb, output_path)
@@ -422,41 +434,55 @@ def _apply_logic_rule(
 # ── 辅助函数 ────────────────────────────────────────────────────
 
 def _describe_template_for_extraction(tmpl_def: dict[str, Any]) -> str:
-    """将模板定义转为 LLM 可读的数据提取说明。"""
+    """将模板定义转为 LLM 可读的数据提取说明。支持多 sheet 格式。"""
     lines = [f"模板名称: {tmpl_def.get('template_name', '')}"]
     lines.append(f"报告类型: {tmpl_def.get('report_type', '')}")
+    lines.append(f"工作表数量: {len(tmpl_def.get('sheets', []))}")
     lines.append("")
 
-    lines.append("## 需要填充的区域:")
-    for region in tmpl_def.get("regions", []):
-        if region.get("type") in ("data_table_header", "data_table_body"):
-            continue
-        lines.append(f"- [{region.get('id', '')}] {region.get('label', '')}")
-        lines.append(f"  位置: {region.get('cells', '')}")
-        lines.append(f"  作用: {region.get('purpose', '')}")
-        lines.append(f"  数据来源: {region.get('data_source_detail', region.get('data_source', ''))}")
-        if region.get("fixed_value"):
-            lines.append(f"  固定值: {region['fixed_value']}")
+    for sheet in tmpl_def.get("sheets", []):
+        sname = sheet.get("sheet_name", "")
+        srole = sheet.get("sheet_role", "")
+        lines.append(f"## 工作表: {sname} ({srole})")
+        lines.append(f"说明: {sheet.get('sheet_description', '')}")
         lines.append("")
 
-    data_table = tmpl_def.get("data_table", {})
-    if data_table:
-        lines.append("## 数据表结构:")
-        lines.append(f"表头行: 第{data_table.get('header_row', '?')}行")
-        lines.append(f"数据起始行: 第{data_table.get('data_start_row', '?')}行")
-        lines.append("列映射:")
-        for col in data_table.get("columns", []):
-            lines.append(f"  - 列{col.get('col_letter', '')}: {col.get('header_text', '')} → {col.get('data_source', '')}")
-        if data_table.get("expand_logic"):
-            lines.append(f"展开逻辑: {data_table['expand_logic']}")
-        lines.append("")
+        lines.append("### 需要填充的区域:")
+        for region in sheet.get("regions", []):
+            if region.get("type") in ("data_table_header", "data_table_body"):
+                continue
+            lines.append(f"- [{region.get('id', '')}] {region.get('label', '')}")
+            lines.append(f"  位置: {region.get('cells', '')}")
+            lines.append(f"  作用: {region.get('purpose', '')}")
+            lines.append(f"  数据来源: {region.get('data_source_detail', region.get('data_source', ''))}")
+            if region.get("fixed_value"):
+                lines.append(f"  固定值: {region['fixed_value']}")
+            lines.append("")
+
+        data_table = sheet.get("data_table", {})
+        if data_table:
+            lines.append("### 数据表结构:")
+            lines.append(f"表头行: 第{data_table.get('header_row', '?')}行")
+            lines.append(f"数据起始行: 第{data_table.get('data_start_row', '?')}行")
+            lines.append("列映射:")
+            for col in data_table.get("columns", []):
+                lines.append(f"  - 列{col.get('col_letter', '')}: {col.get('header_text', '')} → {col.get('data_source', '')}")
+            if data_table.get("expand_logic"):
+                lines.append(f"展开逻辑: {data_table['expand_logic']}")
+            lines.append("")
+
+    cross = tmpl_def.get("cross_sheet_logic", [])
+    if cross:
+        lines.append("## 跨工作表数据流:")
+        for c in cross:
+            lines.append(f"- {c.get('description', '')}: {c.get('source_sheet', '')}.{c.get('source_cells', '')} → {c.get('target_sheet', '')}.{c.get('target_cells', '')}")
 
     logic_rules = tmpl_def.get("logic_rules", [])
     if logic_rules:
-        lines.append("## 逻辑规则:")
+        lines.append("\n## 逻辑规则:")
         for rule in logic_rules:
             lines.append(f"- {rule.get('description', '')}: {rule.get('expression', '')}")
-            lines.append(f"  应用于: {rule.get('applies_to', '')}")
+            lines.append(f"  应用于: {rule.get('applies_in_sheet', '')}.{rule.get('applies_to', '')}")
         lines.append("")
 
     return "\n".join(lines)
@@ -495,21 +521,29 @@ def _save_preview(
     if report_data:
         lines.append("## 报告信息")
         lines.append("")
-        for region in tmpl_def.get("regions", []):
-            if region.get("type") in ("data_table_header", "data_table_body"):
-                continue
-            rid = region.get("id", "")
-            label = region.get("label", rid)
-            value = report_data.get(rid, "")
-            if value:
-                lines.append(f"- **{label}:** {value}")
+        for sheet in tmpl_def.get("sheets", []):
+            for region in sheet.get("regions", []):
+                if region.get("type") in ("data_table_header", "data_table_body"):
+                    continue
+                rid = region.get("id", "")
+                label = region.get("label", rid)
+                value = report_data.get(rid, "")
+                if value:
+                    lines.append(f"- **{label}:** {value}")
         lines.append("")
 
     data_rows = extracted.get("data_table_rows", [])
     if data_rows:
         lines.append(f"## 检测数据 ({len(data_rows)} 条)")
         lines.append("")
-        data_table = tmpl_def.get("data_table", {})
+        # 从 main_report 工作表获取数据表列定义
+        data_table = {}
+        for s in tmpl_def.get("sheets", []):
+            if s.get("data_table") and s.get("sheet_role") == "main_report":
+                data_table = s["data_table"]
+                break
+        if not data_table:
+            data_table = tmpl_def.get("data_table", {})
         columns = data_table.get("columns", [])
         if columns:
             headers = [c.get("header_text", c.get("col_letter", "")) for c in columns]
