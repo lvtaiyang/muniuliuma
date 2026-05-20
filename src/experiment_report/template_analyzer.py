@@ -167,7 +167,7 @@ def analyze_template(file_path: str | Path) -> dict[str, Any]:
 
     # 按工作表数量动态调整 max_tokens：每个 sheet 至少 3000 tokens
     sheet_count = len(xlsx_structure.get("sheets", []))
-    max_tok = max(4000, sheet_count * 3000)
+    max_tok = max(4000, sheet_count * 10000)
 
     client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=300)
 
