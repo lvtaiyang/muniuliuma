@@ -1082,6 +1082,8 @@ def _summarize_result(tool_name: str, result: str) -> str:
         return f"[错误] {str(data['error'])[:200]}"
     if "template_name" in data:
         parts.append(f"模板: {data['template_name']}")
+    if "sheet_count" in data:
+        parts.append(f"{data['sheet_count']}个工作表")
     if "report_type" in data:
         parts.append(f"类型: {data['report_type']}")
     if "report_count" in data:

@@ -165,7 +165,11 @@ def analyze_template(file_path: str | Path) -> dict[str, Any]:
     # 读取 xlsx 完整结构
     xlsx_structure = _read_xlsx_structure(file_path)
 
-    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=180)
+    # 按工作表数量动态调整 max_tokens：每个 sheet 至少 3000 tokens
+    sheet_count = len(xlsx_structure.get("sheets", []))
+    max_tok = max(4000, sheet_count * 3000)
+
+    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=300)
 
     response = client.chat.completions.create(
         model=llm["model"],
@@ -173,7 +177,7 @@ def analyze_template(file_path: str | Path) -> dict[str, Any]:
             {"role": "system", "content": TEMPLATE_ANALYSIS_SYSTEM_PROMPT},
             {"role": "user", "content": _build_analysis_prompt(file_path.name, xlsx_structure)},
         ],
-        max_tokens=4000,
+        max_tokens=max_tok,
         temperature=0.1,
     )
 
