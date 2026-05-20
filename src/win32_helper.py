@@ -76,14 +76,31 @@ def _call_bridge(cmd_args: list[str]) -> dict[str, Any]:
     full_cmd = [windows_py, bridge_path] + cmd_args
 
     try:
-        result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(full_cmd, capture_output=True, timeout=120)
+
+        # Windows 中文环境 stdout 可能是 GBK，先试 UTF-8 再试 GBK
+        stdout = ""
+        stderr = ""
+        for data, target in [(result.stdout, "stdout"), (result.stderr, "stderr")]:
+            if data:
+                for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
+                    try:
+                        decoded = data.decode(encoding)
+                        if target == "stdout":
+                            stdout = decoded
+                        else:
+                            stderr = decoded
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+
         if result.returncode != 0:
-            return {"error": f"COM 桥接失败: {result.stderr[:500]}"}
-        return json.loads(result.stdout)
+            return {"error": f"COM 桥接失败: {stderr[:500]}"}
+        return json.loads(stdout)
     except subprocess.TimeoutExpired:
         return {"error": "COM 操作超时（120秒），请检查 Office/WPS 是否正常"}
     except json.JSONDecodeError:
-        return {"error": f"COM 桥接返回非 JSON: {result.stdout[:300] if result.stdout else 'empty'}"}
+        return {"error": f"COM 桥接返回非 JSON: {stdout[:300] if stdout else 'empty'}"}
     except Exception as e:
         return {"error": f"桥接调用失败: {e}"}
 

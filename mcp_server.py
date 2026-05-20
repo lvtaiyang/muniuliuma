@@ -3,16 +3,13 @@
 每个模块独立注册自己的 MCP 工具，框架无关。
 
 启动方式:
-    python mcp_server.py
-    或配置到任意 MCP 兼容框架:
-    {
-      "mcpServers": {
-        "muniuliuma": {
-          "command": "python",
-          "args": ["path/to/mcp_server.py"]
-        }
-      }
-    }
+    python mcp_server.py              # stdio 模式（本地智能体）
+    python mcp_server.py --sse        # SSE HTTP 模式（远程/WSL 智能体，默认 :8700）
+    python mcp_server.py --sse --port 8700 --host 0.0.0.0
+
+MCP 配置:
+    stdio: {"command": "python", "args": ["path/to/mcp_server.py"]}
+    SSE:   {"url": "http://localhost:8700/sse"}
 """
 
 from __future__ import annotations
@@ -1031,14 +1028,58 @@ def _summarize_result(tool_name: str, result: str) -> str:
     return "; ".join(parts) if parts else result[:200]
 
 
-async def amain():
+async def amain_stdio():
     async with stdio_server() as (read, write):
         await APP.run(read, write, APP.create_initialization_options())
 
 
+def run_sse(host: str = "127.0.0.1", port: int = 8700):
+    """SSE HTTP 模式：让 WSL/远程智能体通过 HTTP 连接 Windows 上的 MCP Server。"""
+    try:
+        from mcp.server.sse import SseServerTransport
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+        import uvicorn
+    except ImportError as e:
+        print(f"SSE 模式需要额外依赖: {e}")
+        print("  pip install starlette uvicorn")
+        import sys; sys.exit(1)
+
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+            await APP.run(streams[0], streams[1], APP.create_initialization_options())
+
+    async def handle_messages(request):
+        await sse.handle_post_message(request.scope, request.receive, request._send)
+
+    starlette_app = Starlette(routes=[
+        Route("/sse", endpoint=handle_sse),
+        Route("/messages/", endpoint=handle_messages, methods=["POST"]),
+    ])
+
+    print(f"木牛流马 MCP Server (SSE 模式)")
+    print(f"监听: http://{host}:{port}")
+    print(f"MCP 配置: {{\"url\": \"http://{host}:{port}/sse\"}}")
+    uvicorn.run(starlette_app, host=host, port=port, log_level="warning")
+
+
 def run():
     import asyncio
-    asyncio.run(amain())
+    import sys
+
+    if "--sse" in sys.argv:
+        host = "127.0.0.1"
+        port = 8700
+        for i, arg in enumerate(sys.argv):
+            if arg == "--host" and i + 1 < len(sys.argv):
+                host = sys.argv[i + 1]
+            if arg == "--port" and i + 1 < len(sys.argv):
+                port = int(sys.argv[i + 1])
+        run_sse(host=host, port=port)
+    else:
+        asyncio.run(amain_stdio())
 
 
 if __name__ == "__main__":
