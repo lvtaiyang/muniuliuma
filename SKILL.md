@@ -13,25 +13,22 @@
 
 ## 快速接入（给其他智能体使用）
 
-### 1. 下载安装
+### 1. 下载 + 环境检测
 
 ```bash
 git clone https://github.com/lvtaiyang/muniuliuma.git
 cd muniuliuma
-# 跨平台全量（Linux/Mac/Windows 通用）
-pip install -e ".[full]"
-# Windows 用户推荐加装 COM 自动化（完美保留 Word/Excel 格式）
-pip install -e ".[full,win32]"
+
+# 先跑环境检测（纯标准库，零依赖），看清缺什么再装
+python check_env.py
+
+# 补装缺失依赖
+pip install mcp openai pyyaml httpx              # 核心
+pip install python-docx openpyxl                 # 文档处理（可选）
+pip install pywin32                              # Windows COM（可选，完美保留格式）
 ```
 
-按需安装：
-```bash
-pip install -e .                  # 核心
-pip install -e ".[docx]"          # Word 模板填充（回退模式）
-pip install -e ".[xlsx]"          # Excel 回退模式
-pip install -e ".[win32]"         # Windows COM 自动化（推荐）
-pip install -e ".[pdf]"           # PDF 文档分析
-```
+核心依赖（`mcp openai pyyaml httpx`）只有 `mcp` 是新增的，其余三个几乎每个 AI 项目已有，不会重复占用空间。可选依赖（`python-docx openpyxl`）非 Windows 必装，作为 win32com 的回退。
 
 ### 2. 配置 API Key
 
