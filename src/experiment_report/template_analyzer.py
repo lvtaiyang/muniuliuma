@@ -311,15 +311,8 @@ def list_template_definitions(project_name: str) -> list[dict[str, Any]]:
 # ── 内部函数 ────────────────────────────────────────────────────
 
 def _read_xlsx_structure(file_path: Path) -> dict[str, Any]:
-    """通过 win32com Excel/WPS 读取 xlsx 完整结构信息。
-
-    包括单元格位置、内容、合并区域。完美读取所有格式信息。
-    """
+    """读取 xlsx 完整结构信息。win32com 优先，无则回退 openpyxl。"""
     from .. import win32_helper
-
-    if not win32_helper.WIN32_AVAILABLE:
-        raise RuntimeError("win32com 不可用，请在 Windows 上运行")
-
     return win32_helper.excel_read_structure(file_path)
 
 
