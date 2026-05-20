@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src import config as cfg
+from src import activity_logger
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -524,9 +525,73 @@ async def tool_read_experiment_report(project_name: str, filename: str) -> str:
     return content
 
 
+# ── 活动日志工具 ────────────────────────────────────────────────
+
+async def tool_get_activity_log(
+    limit: str = "20", tool_name: str = "",
+    module: str = "", status: str = "",
+    since: str = "",
+) -> str:
+    """查询 MCP 工具的调用历史。可用于查看之前做了什么、排查问题。"""
+    logs = activity_logger.query_logs(
+        limit=int(limit),
+        tool_name=tool_name,
+        module=module,
+        status=status,
+        since=since,
+    )
+    # 简化输出
+    compact = []
+    for entry in logs:
+        compact.append({
+            "time": entry["called_at"],
+            "tool": entry["tool_name"],
+            "module": entry["module"],
+            "status": entry["status"],
+            "duration_ms": entry["duration_ms"],
+            "summary": entry["result_summary"][:200],
+        })
+    return json.dumps({
+        "count": len(compact),
+        "logs": compact,
+        "hint": "用 since='1h'/'24h' 筛选时间，用 module='experiment_report' 筛选模块",
+    }, ensure_ascii=False, indent=2)
+
+
+async def tool_get_activity_summary(since: str = "24h") -> str:
+    """获取最近活动概要：调用次数、成功率、各模块/工具使用统计、最近错误。"""
+    summary = activity_logger.get_summary(since=since)
+    return json.dumps(summary, ensure_ascii=False, indent=2)
+
+
 # ── 工具注册表 ──────────────────────────────────────────────────
 
 TOOLS = [
+    # ── 系统工具 ──
+    Tool(
+        name="get_activity_log",
+        description="查询 MCP 工具调用历史日志。智能体在开始任务前应先查看此日志，了解之前做了什么、避免重复运行。支持按工具名、模块、状态、时间过滤。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "string", "description": "返回条数，默认 20"},
+                "tool_name": {"type": "string", "description": "按工具名筛选，如 'analyze_experiment_template'"},
+                "module": {"type": "string", "description": "按模块筛选，如 'experiment_report'"},
+                "status": {"type": "string", "description": "按状态筛选: success / error"},
+                "since": {"type": "string", "description": "时间范围: 1h / 24h / 7d"},
+            },
+        },
+    ),
+    Tool(
+        name="get_activity_summary",
+        description="获取最近 MCP 活动概要：调用次数、成功率、各模块/工具使用统计、最近错误。适合在开始工作前快速了解当前状态。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "since": {"type": "string", "description": "时间范围: 1h / 24h / 7d，默认 24h"},
+            },
+        },
+    ),
     Tool(
         name="check_wechat_setup",
         description="检测 wechat-cli 运行环境：Node.js 是否安装、wechat-cli 是否可用、依赖是否就绪。首次使用前应先调用此工具。",
@@ -860,6 +925,9 @@ TOOLS = [
 ]
 
 TOOL_MAP = {
+    # 活动日志
+    "get_activity_log": tool_get_activity_log,
+    "get_activity_summary": tool_get_activity_summary,
     "check_wechat_setup": tool_check_setup,
     "install_wechat_cli": tool_install_wechat_cli,
     "list_wechat_groups": tool_list_wechat_groups,
@@ -904,11 +972,73 @@ async def list_tools():
 
 @APP.call_tool()
 async def call_tool(name: str, arguments: dict):
+    import time as _time
+    _start = _time.time()
     handler = TOOL_MAP.get(name)
     if not handler:
         raise ValueError(f"Unknown tool: {name}")
-    result = await handler(**arguments)
-    return [TextContent(type="text", text=result)]
+
+    try:
+        result = await handler(**arguments)
+        _elapsed = int((_time.time() - _start) * 1000)
+        # 记录成功调用
+        activity_logger.log_call(
+            tool_name=name,
+            params=arguments,
+            result_summary=_summarize_result(name, result),
+            status="success",
+            duration_ms=_elapsed,
+            module=activity_logger._classify_module(name),
+        )
+        return [TextContent(type="text", text=result)]
+    except Exception as exc:
+        _elapsed = int((_time.time() - _start) * 1000)
+        activity_logger.log_call(
+            tool_name=name,
+            params=arguments,
+            result_summary=str(exc)[:500],
+            status="error",
+            duration_ms=_elapsed,
+            module=activity_logger._classify_module(name),
+        )
+        raise
+
+
+def _summarize_result(tool_name: str, result: str) -> str:
+    """从工具返回的 JSON 中提取摘要信息。"""
+    if not result:
+        return ""
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        return result[:200]
+
+    parts = []
+    if "error" in data:
+        return f"[错误] {str(data['error'])[:200]}"
+    if "template_name" in data:
+        parts.append(f"模板: {data['template_name']}")
+    if "report_type" in data:
+        parts.append(f"类型: {data['report_type']}")
+    if "report_count" in data:
+        parts.append(f"生成 {data['report_count']} 份报告")
+    if "needs_confirmation" in data:
+        parts.append(f"待确认: {data.get('confirmation_required', 0)} 个问题")
+    if "total" in data:
+        parts.append(f"共 {data['total']} 项")
+    if "projects" in data:
+        if isinstance(data.get("projects"), list):
+            parts.append(f"{len(data['projects'])} 个项目")
+    if "saved_to" in data:
+        parts.append(f"已保存: {data['saved_to']}")
+    if "saved" in data:
+        parts.append(f"已保存: {data['saved']}")
+    if "config" in data:
+        parts.append("配置已更新")
+    if "groups" in data:
+        parts.append(f"{len(data.get('groups', []))} 个群聊")
+
+    return "; ".join(parts) if parts else result[:200]
 
 
 async def amain():

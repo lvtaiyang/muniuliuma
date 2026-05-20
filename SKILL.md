@@ -1,7 +1,7 @@
 # 木牛流马 — 工程行业 AI 技能工具箱
 
 工程行业通用智能体技能集，通过 MCP 协议对接任意智能体框架（Claude Code / Cursor / Dify 等）。
-**30 个 MCP 工具，5 个独立模块。**
+**32 个 MCP 工具，5 个独立模块 + 活动日志系统。**
 
 ## 前置条件
 
@@ -167,6 +167,7 @@ generate_experiment_report    ← 台账→LLM提取→填充xlsx→另存
 ```
 智能体收到用户请求后：
 
+0. get_activity_summary / get_activity_log → 查看之前做过什么，避免重复运行
 1. check_wechat_setup → 检测环境
    ├─ 就绪 → 下一步
    └─ 缺失 → install_wechat_cli 自动安装
@@ -193,6 +194,7 @@ muniuliuma/
 ├── vendor/wechat-cli/         # wechat-cli 内置 npm 包
 └── src/
     ├── config.py              # 配置管理（text/vision 双模型）
+    ├── activity_logger.py     # 活动日志（SQLite，自动记录每次工具调用）
     ├── win32_helper.py        # COM 自动化 + openpyxl 回退（Word/Excel 操作）
     ├── wechat_monitor/        # 模块1: 微信影像归档
     ├── project_initializer/   # 模块2: 项目初始化与模板管理
