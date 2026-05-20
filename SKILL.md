@@ -1,288 +1,90 @@
 # 木牛流马 — 工程行业 AI 技能工具箱
 
-工程行业通用智能体技能集，通过 MCP 协议对接任意智能体框架（Claude Code / Cursor / Dify 等）。
-**37 个 MCP 工具，5 个独立模块 + 活动日志系统。**
+工程行业通用智能体技能集，通过 MCP 协议对接任意智能体框架。
+**37 个 MCP 工具，5 个独立模块。**
 
 ## 架构原则
 
 ```
-智能体（你）                         MCP 工具
-─────────                         ────────
-思考、匹配、决策、生成内容    →     纯 I/O：读文件、写单元格、另存
-（纯文本任务由智能体完成）           （不内嵌 LLM，智能体更聪明）
-
-分析照片、识别影像           →     内嵌多模态 LLM
-（智能体可能是纯文本模型）          （wechat_monitor / image_organizer）
+纯文本任务                           多模态任务
+（模板分析/数据匹配/报告生成）        （照片分析/影像分类）
+        ↓                                  ↓
+  智能体自己思考决策                  MCP 内嵌多模态 LLM
+  MCP 只做数据读写                   智能体只发起调用
 ```
-
-**纯文本任务**由智能体自己分析决策，MCP 只做数据读写。
-**多模态任务**由 MCP 内嵌多模态模型处理，智能体只发起调用。
-
-## 前置条件
-
-- Python >= 3.10
-- 纯文本 LLM API Key（OpenAI 兼容协议，推荐 DeepSeek v4 Flash）— 模板分析/文档生成/数据提取
-- 多模态 LLM API Key（OpenAI 兼容协议，推荐通义千问 qwen3.6-plus）— 照片分析/影像分类
-- Node.js >= 14（仅模块 2 微信监控需要，自动检测安装）
-- Windows + Office/WPS（仅 Word/Excel 模板填充需要，非 Windows 环境走 openpyxl 回退）
 
 ## 快速接入（给其他智能体使用）
 
-### 1. 下载 + 环境检测
-
 ```bash
-git clone https://github.com/lvtaiyang/muniuliuma.git
-cd muniuliuma
-
-# 先跑环境检测（纯标准库，零依赖），看清缺什么再装
-python check_env.py
-
-# 补装缺失依赖
-pip install mcp openai pyyaml httpx              # 核心
-pip install python-docx openpyxl                 # 文档处理（可选）
-pip install pywin32                              # Windows COM（可选，完美保留格式）
+git clone https://github.com/lvtaiyang/muniuliuma.git && cd muniuliuma
+python check_env.py                                    # 检测环境
+pip install mcp openai pyyaml httpx                    # 核心依赖
+pip install python-docx openpyxl                       # 文档处理（可选）
+# 编辑 config.yaml，填入 DeepSeek 和 Qwen 的 api_key
 ```
 
-核心依赖（`mcp openai pyyaml httpx`）只有 `mcp` 是新增的，其余三个几乎每个 AI 项目已有，不会重复占用空间。可选依赖（`python-docx openpyxl`）非 Windows 必装，作为 win32com 的回退。
-
-### 2. 配置 API Key
-
-编辑 `config.yaml`，填入自己的模型 key：
-
-```yaml
-llm:
-  text:       # 纯文本
-    api_key: sk-your-deepseek-key
-  vision:     # 多模态
-    api_key: sk-your-qwen-key
-```
-
-MCP Server 内部自动按任务类型选择模型，一次配置所有调用方共用。主智能体不需要关心模型的事。
-
-### 3. 在智能体框架中注册
-
-**Claude Code** — 命令行添加：
-```bash
-claude mcp add muniuliuma -- python /path/to/muniuliuma/mcp_server.py
-```
-或手动编辑 `~/.claude/mcp.json`：
+MCP 配置：
 ```json
-{
-  "mcpServers": {
-    "muniuliuma": {
-      "command": "python",
-      "args": ["/path/to/muniuliuma/mcp_server.py"]
-    }
-  }
-}
+{"mcpServers": {"muniuliuma": {"command": "python", "args": ["/path/to/muniuliuma/mcp_server.py"]}}}
 ```
-
-**Cursor** — 编辑 `.cursor/mcp.json`：
-```json
-{
-  "mcpServers": {
-    "muniuliuma": {
-      "command": "python",
-      "args": ["/path/to/muniuliuma/mcp_server.py"]
-    }
-  }
-}
-```
-
-**Dify / 其他支持 MCP 的框架** — 同样的 stdio MCP 协议，配置格式一致。
-
-注册后重启智能体，即可自动发现全部 30 个工具。
 
 ---
 
-## 模块 1: 建设期项目初始化 (project_initializer)
-**9 tools** — 对话式创建项目，全流程 7 阶段，模板上传/分析/复用
+# ⚠️ 智能体行为规范（必读）
+
+## 规则 1：永远不要假设 API Key 已配置
+
+**每次对话开始**，先用 `get_config` 检查 API Key 是否已填。如果没有：
+- 纯文本任务 → 走纯 I/O 路径（智能体自己分析）
+- 多模态任务 → 告诉用户需要配置 vision API Key
+
+## 规则 2：模板中数据只是示例
+
+xlsx 模板中的一切数值（0.98、98.1%、K9+370.58）都是示例/占位数据。
+**不要提取模板中的数值当作真实数据**。真实数据必须从台账获取。
+
+## 规则 3：默认走纯 I/O 路径
+
+以下工具不调 LLM，是默认选择：
 
 | 工具 | 用途 |
 |------|------|
-| `project_init` | 创建项目 + 7 阶段目录骨架 |
-| `project_list/load/update` | 浏览/加载/更新项目 |
-| `project_discover` | 从目录反向查找关联项目 |
-| `template_analyze` | LLM 分析上传的 Word/Excel/PDF 模板 |
-| `template_save/list/apply` | 保存/列表/应用模板生成文档 |
+| `read_template_cells` | 读 xlsx 全部单元格位置+内容 |
+| `read_ledger` (通过 ledger_reader) | 读台账数据 |
+| `fill_template_cells` | 写单元格值并另存 |
 
-## 模块 2: 微信隐蔽验收影像归档 (wechat_monitor)
-**8 tools** — 监控微信群图片，多模态分析，分类归档
+以下工具内嵌 LLM，**仅在以下情况使用**：
+- `analyze_experiment_template` — 模板>3个sheet 或 >50处合并区域，智能体难以直接理解时
+- `generate_experiment_report` — 快速原型/草稿
+- `organize_images` / `run_monitor` — 需要多模态分析照片
 
-| 工具 | 用途 |
-|------|------|
-| `check_wechat_setup` | 检测 wechat-cli 环境 |
-| `install_wechat_cli` | 自动安装 wechat-cli |
-| `list_wechat_groups` | 列出微信群聊 |
-| `setup_monitoring` | 配置群聊/项目/模型/归档路径 |
-| `run_monitor` | 执行监控管线：拉图→分析→分类→归档 |
-| `get_summary/get_config/update_config` | 汇总/配置管理 |
-
-## 模块 3: 现有影像资料整理 (image_organizer)
-**2 tools** — 扫描已有图片目录，分析/分类/归档
-
-| 工具 | 用途 |
-|------|------|
-| `scan_directory` | 预览目录图片列表 |
-| `organize_images` | 扫描→多模态分析→分类→归档 |
-
-## 模块 4: 施工日志生成 (construction_log)
-**4 tools** — 从影像或台账生成施工日志，填入 Word 模板
-
-| 工具 | 用途 |
-|------|------|
-| `generate_daily_log` | 从归档照片生成施工日志（多模态） |
-| `generate_log_from_ledgers` | 从台账文件生成施工日志（纯文本） |
-| `list_logs/read_log` | 浏览/读取日志 |
-
-## 模块 5: 实验检测报告自动生成 (experiment_report)
-**7 tools** — 从实验台账 + xlsx 模板生成标准检测报告
-
-### 核心流程
+## 规则 4：生成报告的标准流程
 
 ```
-上传 xlsx 模板
-    ↓
-analyze_experiment_template   ← LLM 逐单元格分析：含义/数据来源/逻辑关系
-    ↓                              不确定处生成具体问题
-返回分析结果 + 待确认问题
-    ↓
-用户回答问题
-    ↓
-confirm_template_analysis     ← 合并答案，确认后保存模板定义
-    ↓
-generate_experiment_report    ← 台账→LLM提取→填充xlsx→另存
-    ↓
-输出 .xlsx 实验报告 + Markdown 预览
+步骤1: read_template_cells(模板路径)
+       → 返回所有工作表的所有单元格(位置+内容)
+       → 你自己看哪些是固定文本、哪些要填充、数据表在哪
+
+步骤2: 读取台账（用户提供或已有）
+       → 分析台账的列: 序号/桩号/部位/设计指标/厚度/施工日期/检测日期
+
+步骤3: 你自己做数据匹配和计算:
+       - 固定文本 → 直接用模板中的标签/标题值
+       - 台账有的列 → 精确提取
+       - 需要计算的 → 你自己算(平均值=sum/count, 合格率=合格数/总数)
+       - 检测结论 → 你自己写(参考JTG F80/1-2017格式)
+       - 台账确实没有的 → "见原始记录"
+
+步骤4: fill_template_cells(模板路径, 输出路径, {"Sheet1": {"A3": "值", "B5": "值", ...}})
+       → COM写入并另存为新文件
 ```
 
-### 工具
+**不要**调用 `generate_experiment_report`，除非用户明确要求"快速生成个草稿看看"。
 
-| 工具 | 用途 |
-|------|------|
-| `analyze_experiment_template` | 逐单元格深度分析 xlsx 模板，识别数据来源和逻辑关系 |
-| `confirm_template_analysis` | 回答不确定问题，保存确认后的模板定义 |
-| `list_experiment_templates` | 列出项目可用模板定义 |
-| `generate_experiment_report` | 用模板+台账批量生成实验报告（xlsx） |
-| `generate_single_experiment_report` | 为特定检测项目生成单份报告 |
-| `list_experiment_reports` | 列出已生成的报告 |
-| `read_experiment_report` | 读取报告内容（xlsx 以 Markdown 预览） |
+## 规则 5：项目初始化必须先做
 
-### 关键设计
-
-- **逐单元格理解**：LLM 分析每个有值单元格的精确行列号、合并区域、数据来源
-- **逻辑关系识别**：自动发现单元格间的计算/判定逻辑（如 "实测值 vs 标准要求 → 合格/不合格"）
-- **不确定必问**：任何拿不准的单元格含义或逻辑关系，生成具体问题让用户确认
-- **win32com 填充**：Windows 上驱动本地 Excel/WPS 原生操作，完美保留合并单元格、边框、字体等格式；非 Windows 走 openpyxl 回退
+首次对话先 `get_activity_summary`，没有项目的话按 `docs/modules/project_initializer.md` 流程初始化。
 
 ---
 
-## 智能体行为规范
-
-### 首次对话：必须先做项目初始化
-
-智能体收到用户消息后，第一步不是执行具体工具，而是确认项目上下文。流程如下：
-
-```
-1. get_activity_summary / get_activity_log
-   → 查看是否有已创建的项目
-
-2. 如果没有项目：
-   → 告诉用户需要先初始化项目，询问以下信息：
-   
-   a) 项目名称是什么？
-   b) 项目类型？（住宅/工业/市政/公路/水利/其他）
-   c) 当前处于哪个阶段？
-      - 前期阶段 → 前3个阶段（前期决策/设计准备/招标合同）
-      - 施工阶段 → 第4阶段（施工实施）+ 后面阶段
-      - 竣工后   → 第5-7阶段（竣工验收/结算审计/后评估）
-   d) 工作区放在哪个目录？
-
-3. project_init → 按阶段创建工作区目录结构
-   施工阶段的额外创建：
-     04_施工实施/
-       ├── 隐蔽验收影像资料/
-       ├── 施工日志/
-       ├── 实验检测报告/
-       └── 材料台账/
-
-4. 工作区创建完成后，告诉用户：
-   - 目录已创建在哪个路径
-   - 接下来可以做模板分析（上传实验报告xlsx模板）
-   - 或者可以上传台账数据
-   - 或者可以配置微信监控
-```
-
-## 实验报告生成 — 智能体驱动流程
-
-模板中的数值只是示例数据，不是真实检测结果。智能体应自己分析、匹配、决策。
-
-### 推荐流程
-
-```
-① read_template_cells(xlsx)
-   → 获取所有工作表的所有单元格位置和内容
-   → 智能体自己分析: 哪些是固定文本? 哪些需要填充? 数据表在哪?
-
-② read_ledger(xlsx)
-   → 获取台账的所有行和列
-   → 智能体自己匹配: 台账列 → 模板单元格
-
-③ 智能体构建填充数据:
-   - 固定文本 → 直接用模板中的值
-   - 台账有的 → 从台账提取
-   - 需要计算的 → 智能体自己算（平均值、合格率等）
-   - 需要生成的 → 智能体自己写（检测结论、备注等）
-   - 台账没有的 → 填"见原始记录"
-
-④ fill_template_cells(template, output, {Sheet1: {A3: "值", ...}})
-   → COM 写入并另存
-```
-
-### 辅助工具（需要时使用）
-
-| 工具 | 场景 |
-|------|------|
-| `analyze_experiment_template` | 模板结构复杂(3+sheet/50+合并区域)，智能体难以直接理解时 |
-| `generate_experiment_report` | 快速原型，让内嵌 LLM 先出个草稿 |
-
-### 不同阶段的默认行为
-
-| 用户说 | 所处阶段 | 智能体应该 |
-|--------|---------|-----------|
-| "我要做实验报告" | 施工实施 | 先检查项目，确认有台账模板，再分析 |
-| "帮我整理影像" | 施工实施 | 先确认归档目录，再扫描 |
-| "我要写施工日志" | 施工实施 | 先确认项目和日期，有影像/台账再生成 |
-| "帮我审结算" | 结算审计 | 确认项目已切到06阶段，再分析结算文件 |
-| "新建一个项目" | 任何 | 走完整初始化流程 |
-
-### 日常使用
-
-```
-1. get_activity_summary → 了解最近做了什么，避免重复
-2. 按用户需求调用对应模块工具
-3. 每次关键操作后告诉用户结果和下一步
-```
-
-## 项目结构
-
-```
-muniuliuma/
-├── SKILL.md
-├── config.yaml
-├── mcp_server.py              # MCP Server 入口（30 tools）
-├── pyproject.toml
-├── test_experiment_report.py  # 实验报告功能测试脚本
-├── vendor/wechat-cli/         # wechat-cli 内置 npm 包
-└── src/
-    ├── config.py              # 配置管理（text/vision 双模型）
-    ├── activity_logger.py     # 活动日志（SQLite，自动记录每次工具调用）
-    ├── win32_helper.py        # COM 自动化 + openpyxl 回退（Word/Excel 操作）
-    ├── wechat_monitor/        # 模块1: 微信影像归档
-    ├── project_initializer/   # 模块2: 项目初始化与模板管理
-    ├── image_organizer/       # 模块3: 现有资料整理
-    ├── construction_log/      # 模块4: 施工日志生成
-    └── experiment_report/     # 模块5: 实验报告生成
-        ├── template_analyzer.py   # xlsx 模板逐单元格分析
-        └── report_generator.py    # 台账数据提取 + xlsx 填充
-```
+详细模块说明见 `docs/modules/` 目录。
