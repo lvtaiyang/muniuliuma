@@ -22,39 +22,55 @@ from .. import config as cfg
 from ..construction_log import ledger_reader
 from . import template_analyzer
 
-DATA_EXTRACTION_PROMPT = """你是工程实验检测数据提取专家。根据模板定义的字段和台账数据，提取/整理生成实验报告所需的数据。
+DATA_COMPLETION_PROMPT = """你是工程实验检测报告数据专家。根据数据映射表和台账，生成一份完整、可用的报告数据。
 
-模板中的每个 region 都有 data_source 说明，你需要根据这些说明从台账中找到对应数据。
+## 数据映射表
+
+下表列出了报告中每一个需要填充的单元格。每行包含：
+- cell/region_id: 位置标识
+- purpose: 该位置的作用
+- data_type: fixed(固定值) / ledger(台账提取) / calculated(计算) / generated(需生成)
+- source: 数据来源说明
+- logic: 如有计算逻辑，这里描述
+
+## 你的任务
+
+1. **固定值**：直接使用 data_type=固定值 的值
+2. **台账提取**：从台账中找到对应的列/字段，精确提取。如果台账有多行匹配，全部提取
+3. **计算值**：根据 logic 描述的计算逻辑，用台账数据计算
+4. **需生成**：根据检测数据和行业知识生成（如检测结论、备注）。必须专业、规范。
+5. **数据补全**：台账可能不完整。从已有数据推断、从行业常识补充。确实无法确定的填"见原始记录"
+
+## 关键规则
+
+- 数据表的行数 = 台账中匹配的样品/测点数量，每行完整填写所有列
+- 根据逻辑规则自动判定（如 实测值>=标准值→合格）
+- 统计行（平均值、合格率、检测点数）必须根据数据行实际计算
+- 检测结论要完整、规范，包含检测依据、检测数量、检测结果、综合判定
+- 签名/日期行填入当前日期
+- 数值保留与台账一致的精度
 
 ## 返回格式
-
-你必须返回以下 JSON：
 
 {
   "report_data": {
     "region_id_1": "填充的值",
-    "region_id_2": "填充的值",
     ...
   },
   "data_table_rows": [
-    {
-      "col_A": "值",
-      "col_B": "值",
-      ...
-    },
+    {"col_A": "值", "col_B": "值", ...},
     ...
   ],
-  "notes": "数据提取说明"
+  "statistics": {
+    "total_points": 检测点数,
+    "qualified_points": 合格点数,
+    "qualification_rate": "合格率百分比",
+    "average_value": "平均值结果",
+    "representative_value": "代表值结果"
+  },
+  "conclusion": "完整检测结论",
+  "notes": "数据来源和补充说明"
 }
-
-其中：
-- report_data: 模板中每个非表格 region 的填充值，key 是 region 的 id
-- data_table_rows: 数据表每一行的填充值，key 是列的 col_letter
-
-## 重要规则
-1. 如果台账中找不到对应数据，填写 "见原始记录"
-2. 数据表的行数应等于台账中的实际样品数
-3. 注意数值精度，保持与台账一致
 """
 
 
@@ -94,26 +110,35 @@ def generate_from_template(
     if not ledger_text.strip():
         return {"error": "台账文件为空或无法读取"}
 
-    # 3. 构建模板描述给 LLM 提取数据
-    template_desc = _describe_template_for_extraction(tmpl_def)
+    # 3. 构建数据映射表：每个需填充的单元格 + 类型 + 来源 + 逻辑
+    data_mapping = _build_data_mapping(tmpl_def)
 
-    # 4. LLM 从台账提取数据
+    # 4. LLM 数据补全：映射表 + 台账 → 完整报告数据
     conf = cfg.load()
     llm = cfg.get_llm_config("text")
-    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=180)
+    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=300)
+
+    # 动态 max_tokens：数据越多需要越多
+    row_estimate = max(5, min(50, len(ledger_text.split("\n")) // 3))
+    max_tok = max(4000, row_estimate * 500)
 
     response = client.chat.completions.create(
         model=llm["model"],
         messages=[
-            {"role": "system", "content": DATA_EXTRACTION_PROMPT},
+            {"role": "system", "content": DATA_COMPLETION_PROMPT},
             {"role": "user", "content": (
-                f"## 模板定义\n\n{template_desc}\n\n"
-                f"## 台账数据\n\n{ledger_text[:12000]}\n\n"
-                f"报告日期: {report_date}\n\n"
-                f"请根据模板定义从台账中提取对应的数据。"
+                f"## 数据映射表\n\n{data_mapping}\n\n"
+                f"## 台账数据\n\n{ledger_text[:15000]}\n\n"
+                f"## 生成要求\n"
+                f"- 报告日期: {report_date}\n"
+                f"- 项目名称: {project_name}\n"
+                f"- 从台账中精确提取数据，按照映射表填充每一个 region\n"
+                f"- 数据表按台账实际行数展开\n"
+                f"- 统计值根据数据行实际计算\n"
+                f"- 检测结论要完整规范\n"
             )},
         ],
-        max_tokens=4000,
+        max_tokens=max_tok,
         temperature=0.2,
     )
 
@@ -190,26 +215,27 @@ def generate_single_from_template(
     if not ledger_text.strip():
         return {"error": "台账文件为空或无法读取"}
 
-    template_desc = _describe_template_for_extraction(tmpl_def)
+    data_mapping = _build_data_mapping(tmpl_def)
 
     conf = cfg.load()
     llm = cfg.get_llm_config("text")
-    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=180)
+    client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=300)
 
-    context = f"\n\n额外说明: {extra_context}" if extra_context else ""
+    ctx = f"\n\n额外说明: {extra_context}" if extra_context else ""
+    max_tok = max(4000, max(5, min(50, len(ledger_text.split("\n")) // 3)) * 500)
 
     response = client.chat.completions.create(
         model=llm["model"],
         messages=[
-            {"role": "system", "content": DATA_EXTRACTION_PROMPT},
+            {"role": "system", "content": DATA_COMPLETION_PROMPT},
             {"role": "user", "content": (
-                f"请只提取检测项目为「{test_item}」的数据。{context}\n\n"
-                f"## 模板定义\n\n{template_desc}\n\n"
-                f"## 台账数据\n\n{ledger_text[:12000]}\n\n"
+                f"只提取检测项目为「{test_item}」的数据。{ctx}\n\n"
+                f"## 数据映射表\n\n{data_mapping}\n\n"
+                f"## 台账数据\n\n{ledger_text[:15000]}\n\n"
                 f"报告日期: {report_date}"
             )},
         ],
-        max_tokens=4000,
+        max_tokens=max_tok,
         temperature=0.2,
     )
 
@@ -292,56 +318,98 @@ def read_report(project_name: str, filename: str) -> str | None:
 
 # ── 辅助函数 ────────────────────────────────────────────────────
 
-def _describe_template_for_extraction(tmpl_def: dict[str, Any]) -> str:
-    """将模板定义转为 LLM 可读的数据提取说明。支持多 sheet 格式。"""
-    lines = [f"模板名称: {tmpl_def.get('template_name', '')}"]
-    lines.append(f"报告类型: {tmpl_def.get('report_type', '')}")
-    lines.append(f"工作表数量: {len(tmpl_def.get('sheets', []))}")
-    lines.append("")
+def _build_data_mapping(tmpl_def: dict[str, Any]) -> str:
+    """构建完整的数据映射表：列出模板中每一个需要填充的单元格。
+
+    输出格式为 Markdown 表格，每行一个填充项，LLM 可以直接对照填充。
+    """
+    lines = [
+        f"模板: {tmpl_def.get('template_name', '')} | 类型: {tmpl_def.get('report_type', '')}",
+        f"工作表数: {len(tmpl_def.get('sheets', []))}", "", "",
+    ]
 
     for sheet in tmpl_def.get("sheets", []):
         sname = sheet.get("sheet_name", "")
         srole = sheet.get("sheet_role", "")
-        lines.append(f"## 工作表: {sname} ({srole})")
+        lines.append(f"## 工作表: {sname} (角色: {srole})")
         lines.append(f"说明: {sheet.get('sheet_description', '')}")
         lines.append("")
 
-        lines.append("### 需要填充的区域:")
-        for region in sheet.get("regions", []):
-            if region.get("type") in ("data_table_header", "data_table_body"):
-                continue
-            lines.append(f"- [{region.get('id', '')}] {region.get('label', '')}")
-            lines.append(f"  位置: {region.get('cells', '')}")
-            lines.append(f"  作用: {region.get('purpose', '')}")
-            lines.append(f"  数据来源: {region.get('data_source_detail', region.get('data_source', ''))}")
-            if region.get("fixed_value"):
-                lines.append(f"  固定值: {region['fixed_value']}")
+        # ── 固定区域映射表 ──
+        regions = sheet.get("regions", [])
+        non_table_regions = [r for r in regions if r.get("type") not in ("data_table_header", "data_table_body")]
+        if non_table_regions:
+            lines.append("### 固定区域填充映射")
+            lines.append("| region_id | 位置 | 作用 | 数据类型 | 数据来源/固定值 | 逻辑 |")
+            lines.append("|-----------|------|------|---------|----------------|------|")
+            for r in non_table_regions:
+                rid = r.get("id", "")
+                cells = r.get("cells", "")
+                purpose = r.get("purpose", "")
+                ds = r.get("data_source", "")
+                ds_detail = r.get("data_source_detail", "")
+                fixed = r.get("fixed_value", "")
+                logic = r.get("logic", "")
+
+                if ds == "fixed_value" or fixed:
+                    dtype = "固定值"
+                    source = fixed or ds_detail
+                elif ds in ("calculated",):
+                    dtype = "计算值"
+                    source = ds_detail
+                elif ds in ("manual_input",):
+                    dtype = "需生成"
+                    source = ds_detail
+                elif "ledger" in ds:
+                    dtype = "台账提取"
+                    source = ds_detail
+                elif ds in ("report_title", "project_name"):
+                    dtype = "固定值"
+                    source = ds
+                else:
+                    dtype = "台账提取/生成"
+                    source = ds_detail or ds
+
+                lines.append(f"| {rid} | {cells} | {purpose} | {dtype} | {source} | {logic} |")
             lines.append("")
 
-        data_table = sheet.get("data_table", {})
-        if data_table:
-            lines.append("### 数据表结构:")
-            lines.append(f"表头行: 第{data_table.get('header_row', '?')}行")
-            lines.append(f"数据起始行: 第{data_table.get('data_start_row', '?')}行")
-            lines.append("列映射:")
-            for col in data_table.get("columns", []):
-                lines.append(f"  - 列{col.get('col_letter', '')}: {col.get('header_text', '')} → {col.get('data_source', '')}")
-            if data_table.get("expand_logic"):
-                lines.append(f"展开逻辑: {data_table['expand_logic']}")
-            lines.append("")
+        # ── 数据表映射 ──
+        dt = sheet.get("data_table", {})
+        if dt:
+            columns = dt.get("columns", [])
+            if columns:
+                lines.append("### 数据表列映射")
+                lines.append("| 列 | 表头 | 数据类型 | 数据来源 |")
+                lines.append("|-----|------|---------|---------|")
+                for col in columns:
+                    cl = col.get("col_letter", "")
+                    hdr = col.get("header_text", "")
+                    cds = col.get("data_source", "")
+                    lines.append(f"| {cl} | {hdr} | 台账提取 | {cds} |")
+                lines.append("")
+                lines.append(f"**数据表位置:** 表头第{dt.get('header_row', '?')}行, 数据从第{dt.get('data_start_row', '?')}行开始")
+                lines.append(f"**展开规则:** {dt.get('expand_logic', '每个样品一行')}")
+                lines.append("")
 
+    # ── 跨表数据流 ──
     cross = tmpl_def.get("cross_sheet_logic", [])
     if cross:
-        lines.append("## 跨工作表数据流:")
+        lines.append("## 跨工作表数据流")
         for c in cross:
-            lines.append(f"- {c.get('description', '')}: {c.get('source_sheet', '')}.{c.get('source_cells', '')} → {c.get('target_sheet', '')}.{c.get('target_cells', '')}")
+            lines.append(f"- {c.get('description', '')}: "
+                         f"{c.get('source_sheet', '')} 的 {c.get('source_cells', '')} "
+                         f"→ {c.get('target_sheet', '')} 的 {c.get('target_cells', '')} "
+                         f"({c.get('logic', '')})")
+        lines.append("")
 
-    logic_rules = tmpl_def.get("logic_rules", [])
-    if logic_rules:
-        lines.append("\n## 逻辑规则:")
-        for rule in logic_rules:
-            lines.append(f"- {rule.get('description', '')}: {rule.get('expression', '')}")
-            lines.append(f"  应用于: {rule.get('applies_in_sheet', '')}.{rule.get('applies_to', '')}")
+    # ── 逻辑规则 ──
+    rules = tmpl_def.get("logic_rules", [])
+    if rules:
+        lines.append("## 判定与计算规则")
+        for rule in rules:
+            lines.append(f"- [{rule.get('rule_id', '')}] {rule.get('description', '')}: "
+                         f"`{rule.get('expression', '')}` "
+                         f"→ 填入 {rule.get('applies_in_sheet', '')} 的 {rule.get('applies_to', '')}")
         lines.append("")
 
     return "\n".join(lines)
